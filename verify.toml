@@ -1,0 +1,27 @@
+[meta]
+name = "verify-gate self-bootstrap"
+
+[[check]]
+name = "main.rs exists"
+type = "file"
+path = "src/main.rs"
+contains = "verify-gate"
+
+[[check]]
+name = "crate named verify-gate"
+type = "file"
+path = "Cargo.toml"
+regex = '(?m)^name[ \t]*=[ \t]*"verify-gate"$'
+
+[[check]]
+name = "readme documents exit codes"
+type = "file"
+path = "README.md"
+contains = "all checks passed"
+
+[[check]]
+name = "sample fixture parseable"
+type = "json"
+path = "test/fixtures/sample.json"
+field = "deps.serde.features[0]"
+equals = "derive"

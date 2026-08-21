@@ -1,0 +1,14 @@
+[meta]
+name = "verify-gate na fixture"
+
+[[check]]
+name = "disabled failing check"
+type = "cmd"
+cmd = "exit 1"
+enabled = false
+
+[[check]]
+name = "still passes"
+type = "file"
+path = "sample.json"
+contains = "verify-gate"

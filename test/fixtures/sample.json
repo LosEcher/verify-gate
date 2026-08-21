@@ -1,0 +1,10 @@
+{
+  "name": "verify-gate",
+  "version": "0.1.0",
+  "meta": {
+    "tags": ["verify", "gate", "test"]
+  },
+  "deps": {
+    "serde": { "features": ["derive"] }
+  }
+}

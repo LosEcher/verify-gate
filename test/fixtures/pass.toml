@@ -1,0 +1,34 @@
+[meta]
+name = "verify-gate pass fixture"
+
+[[check]]
+name = "fixture json exists"
+type = "file"
+path = "sample.json"
+contains = "verify-gate"
+
+[[check]]
+name = "cmd echoes ok"
+type = "cmd"
+cmd = "echo ok"
+stdout_contains = "ok"
+
+[[check]]
+name = "fixture json field"
+type = "json"
+path = "sample.json"
+field = "name"
+equals = "verify-gate"
+
+[[check]]
+name = "nested json field"
+type = "json"
+path = "sample.json"
+field = "meta.tags[0]"
+equals = "verify"
+
+[[check]]
+name = "absent file"
+type = "file"
+path = "not-here.txt"
+expect = "not_exists"

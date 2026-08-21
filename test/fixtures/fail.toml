@@ -1,0 +1,20 @@
+[meta]
+name = "verify-gate fail fixture"
+
+[[check]]
+name = "missing file"
+type = "file"
+path = "nope.txt"
+
+[[check]]
+name = "bad exit code"
+type = "cmd"
+cmd = "exit 3"
+exit = 0
+
+[[check]]
+name = "wrong json value"
+type = "json"
+path = "sample.json"
+field = "version"
+equals = "9.9.9"

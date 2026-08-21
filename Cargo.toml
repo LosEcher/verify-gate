@@ -1,0 +1,21 @@
+[package]
+name = "verify-gate"
+version = "0.1.0"
+edition = "2021"
+description = "Declarative verification manifest executor for AI agents: assert file/cmd/http/git/json outcomes, emit a pass/fail report, and return a strict exit code (0 pass / 1 fail / 2 tool error)."
+license = "MIT"
+repository = "https://github.com/LosEcher/verify-gate"
+keywords = ["verify", "assert", "agent", "gate", "check"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
+ureq = "2"
+
+[[bin]]
+name = "verify-gate"
+path = "src/main.rs"

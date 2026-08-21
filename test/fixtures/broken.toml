@@ -1,0 +1,7 @@
+[meta]
+name = "broken fixture — not a valid manifest"
+
+[[check]]
+name = "unknown type"
+type = "wat"
+path = "x"
