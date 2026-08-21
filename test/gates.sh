@@ -160,14 +160,23 @@ expect_exit "json mismatch fails (1)" 1 $?
 
 # ---------------------------------------------------------------- G9 http matrix
 note "G9: http check matrix"
-PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
-HTTPDIR="$WORK/httpdir"
-mkdir -p "$HTTPDIR"
-echo "verify-gate-http-ok" >"$HTTPDIR/hello.txt"
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$HTTPDIR" >/dev/null 2>&1 &
-HTTP_PID=$!
-sleep 0.6
-cat >"$WORK/http.toml" <<EOF
+if ! command -v python3 >/dev/null 2>&1; then
+  fail "G9 needs python3 (not found)"
+else
+  PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
+  HTTPDIR="$WORK/httpdir"
+  mkdir -p "$HTTPDIR"
+  echo "verify-gate-http-ok" >"$HTTPDIR/hello.txt"
+  python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$HTTPDIR" >/dev/null 2>&1 &
+  HTTP_PID=$!
+  # wait until the server actually answers (up to 10s)
+  READY=0
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if curl -s -o /dev/null "http://127.0.0.1:$PORT/hello.txt"; then READY=1; break; fi
+    sleep 0.5
+  done
+  if [ "$READY" -eq 1 ]; then pass "http server ready"; else fail "http server never ready (port $PORT)"; fi
+  cat >"$WORK/http.toml" <<EOF
 [[check]]
 name = "endpoint 200 + body"
 type = "http"
@@ -175,8 +184,10 @@ url = "http://127.0.0.1:$PORT/hello.txt"
 status = 200
 body_contains = "http-ok"
 EOF
-"$VG" --no-log "$WORK/http.toml" >/dev/null 2>&1
-expect_exit "http 200 + body passes" 0 $?
+  if ! "$VG" --emit json --no-log "$WORK/http.toml" >"$WORK/http-report.json" 2>&1; then
+    cat "$WORK/http-report.json"
+  fi
+  expect_exit "http 200 + body passes" 0 $?
 cat >"$WORK/http-404.toml" <<EOF
 [[check]]
 name = "missing path"
@@ -185,9 +196,10 @@ url = "http://127.0.0.1:$PORT/missing.txt"
 status = 200
 EOF
 "$VG" --no-log "$WORK/http-404.toml" >/dev/null 2>&1
-expect_exit "http 404 fails (1)" 1 $?
-kill "$HTTP_PID" 2>/dev/null
-wait "$HTTP_PID" 2>/dev/null
+  expect_exit "http 404 fails (1)" 1 $?
+  kill "$HTTP_PID" 2>/dev/null
+  wait "$HTTP_PID" 2>/dev/null
+fi
 
 # ---------------------------------------------------------------- G10 na
 note "G10: disabled checks are na, not failures"
