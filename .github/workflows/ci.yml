@@ -39,6 +39,9 @@ jobs:
   # Release assets follow the fixed `verify-gate-<os>-<arch>` naming contract
   # (consumers resolve the right file deterministically; each matrix row
   # builds for an explicit rustc target matching the runner's native arch).
+  # Note: no aarch64-unknown-linux-musl row — ureq's TLS (ring) needs a
+  # full musl-cross toolchain there; add it (zig cc or musl-cross) when an
+  # alpine/arm64 docker consumer appears.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
@@ -54,10 +57,7 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: verify-gate-linux-x86_64-musl
             bin: verify-gate
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            asset: verify-gate-linux-aarch64-musl
-            bin: verify-gate
+            install-musl: 'true'
           - runner: macos-15
             target: aarch64-apple-darwin
             asset: verify-gate-macos-aarch64
@@ -72,7 +72,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install musl toolchain (ring C build)
+        if: matrix.install-musl == 'true'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build release binary (${{ matrix.target }})
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
         run: cargo build --release --target ${{ matrix.target }}
       - name: Stage asset as ${{ matrix.asset }}
         shell: bash
