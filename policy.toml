@@ -1,0 +1,29 @@
+# verify-gate policy self-bootstrap: the guardrails we enforce on our own
+# development runs. G11 (self-bootstrap) runs this against a sample context.
+[meta]
+name = "verify-gate dev policy"
+
+[[rule]]
+id = "no-secret-in-output"
+desc = "agent output must not leak secrets"
+type = "output-regex-deny"
+regex = '(sk-[A-Za-z0-9]{20,}|LOS_AUTH_TOKEN[=:]\s*\S+|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)'
+
+[[rule]]
+id = "no-prod-restart"
+desc = "no production restarts from agent runs"
+type = "cmd-deny"
+regex = 'los\.sh\s+restart|systemctl\s+restart\s+los|restart\s+/governance'
+
+[[rule]]
+id = "tool-call-cap"
+desc = "sanity cap on tool calls per run"
+type = "tool-call-limit"
+max = 200
+
+[[rule]]
+id = "retry-cap"
+desc = "sanity cap on LLM request retries"
+type = "retry-limit"
+field = "llm_request"
+max = 10

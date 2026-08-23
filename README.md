@@ -127,6 +127,90 @@ Check semantics:
 - `json` — `path` + `field` (dotted, with `[n]` array indexes); either
   `equals <json literal>` or `exists = true`.
 
+## Policy mode (policy-gate)
+
+`verify-gate policy` evaluates a **policy manifest** (guardrails) against a
+**run context** (JSON: what a run actually did) and returns the same strict
+exit code: `0` no violations · `1` at least one violation · `2` tool error.
+This is the Policy pillar of the agent kernel: mechanical, declarative
+guardrails instead of prose conventions. The shape is modeled on InstantDB's
+CEL permission system (parse-time validation, explicit allow/deny, scoped
+rules) but P0 uses structured rule kinds — no free-form expression DSL.
+
+```
+verify-gate policy --manifest policy.toml --context ctx.json [--emit json|pretty]
+                   [--log <path>] [--no-log]        # --context - reads stdin
+```
+
+**Run context** (`--context`, JSON; `-` reads stdin):
+
+```json
+{
+  "profile": "headless",
+  "workspace": "/Users/echerlos/syncthing/project/dsfolder",
+  "retries": { "llm_request": 2 },
+  "tool_calls": [ { "name": "bash", "args": "ls" } ],
+  "outputs": [ { "tool": "bash", "text": "..." } ],
+  "cmd_lines": ["bash tools/los.sh restart"]
+}
+```
+
+Missing fields are treated as empty (never an error). The caller (DSH plugin /
+CI) collects the context after a run and evaluates.
+
+**Policy manifest** (TOML): a list of `[[rule]]` entries. Every rule needs
+`id` and `type`; the remaining fields are type-specific. Rules may carry a
+`scope = { profile = "x" }` or `{ workspace = "substring" }`; a rule whose
+scope does not match the context evaluates to `na` (not a failure).
+
+```toml
+[meta]
+name = "dsh-default-policy"
+
+[[rule]]
+id = "headless-no-channel"
+type = "tool-denylist"
+scope = { profile = "headless" }
+deny = ["de_channel_send", "de_notify"]
+
+[[rule]]
+id = "no-secret-in-output"
+type = "output-regex-deny"
+regex = 'sk-[A-Za-z0-9]{20,}'
+
+[[rule]]
+id = "per-turn-call-cap"
+type = "tool-call-limit"
+scope = { profile = "headless" }
+max = 60
+
+[[rule]]
+id = "retry-cap"
+type = "retry-limit"
+field = "llm_request"
+max = 5
+
+[[rule]]
+id = "no-prod-restart"
+type = "cmd-deny"
+regex = 'los\.sh\s+restart|restart\s+/governance'
+```
+
+Rule kinds:
+
+| type | fields | violation when |
+|---|---|---|
+| `tool-denylist` | `deny: [tool...]` | any called tool is in the list |
+| `tool-allowlist` | `allow: [tool...]` | any called tool is not in the list |
+| `output-regex-deny` | `regex` | any output matches (detail never echoes the matched text — it may itself be a secret) |
+| `tool-call-limit` | `max` | tool calls exceed `max` |
+| `retry-limit` | `field, max` | `retries[field]` exceeds `max` (missing = 0) |
+| `cmd-deny` | `regex` | any command line matches |
+
+Parse-time validation (mirroring CEL parse checks): unknown kind, missing
+required fields, empty lists, or an invalid regex → exit `2` (author bug, not
+a policy violation).
+
 ## CLI
 
 ```
@@ -137,6 +221,8 @@ verify-gate [OPTIONS] <manifest.toml>
   --no-log              disable the ledger
   --cwd <dir>           assertion base dir (default: manifest dir)
 
+verify-gate policy --manifest <policy.toml> --context <ctx.json|->
+                   [--emit json|pretty] [--log <path>] [--no-log]
 verify-gate status [--log <path>] [--limit N]
 verify-gate log <runId> [--log <path>]
 ```

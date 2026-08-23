@@ -1,0 +1,8 @@
+{
+  "profile": "dev",
+  "workspace": "/Users/echerlos/syncthing/project/dsfolder/verify-gate",
+  "retries": { "llm_request": 3 },
+  "tool_calls": [ { "name": "bash", "args": "cargo test" } ],
+  "outputs": [ { "tool": "bash", "text": "test result: ok. 24 passed" } ],
+  "cmd_lines": [ "cargo test", "bash test/gates.sh" ]
+}

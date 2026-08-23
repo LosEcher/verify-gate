@@ -25,3 +25,9 @@ type = "json"
 path = "test/fixtures/sample.json"
 field = "deps.serde.features[0]"
 equals = "derive"
+
+[[check]]
+name = "policy subcommand self-bootstrap"
+type = "cmd"
+cmd = "./target/debug/verify-gate policy --manifest policy.toml --context test/fixtures/self-ctx.json --no-log"
+exit = 0

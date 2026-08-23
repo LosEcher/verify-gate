@@ -222,6 +222,62 @@ print("  json report ok")
 '
 expect_exit "json emit parses" 0 $?
 
+# ---------------------------------------------------------------- G13 policy pass
+note "G13: policy manifest + clean context exits 0"
+"$VG" policy --manifest "$FIX/policy.toml" --context "$FIX/ctx-clean.json" --no-log >/dev/null 2>&1
+expect_exit "policy clean exits 0" 0 $?
+
+# ---------------------------------------------------------------- G14 policy violation
+note "G14: policy manifest + violating context exits 1"
+"$VG" policy --manifest "$FIX/policy.toml" --context "$FIX/ctx-violation.json" --no-log >/dev/null 2>&1
+expect_exit "policy violation exits 1" 1 $?
+# and the report names the offending rules without echoing the secret
+"$VG" policy --emit json --manifest "$FIX/policy.toml" --context "$FIX/ctx-violation.json" --no-log 2>/dev/null \
+  | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["verdict"] == "fail", d
+fails = [c for c in d["checks"] if c["result"] == "fail"]
+ids = [c["name"] for c in fails]
+assert "headless-no-channel" in ids, ids
+assert "no-secret-in-output" in ids, ids
+assert "no-prod-restart" in ids, ids
+for c in fails:
+    assert "sk-" not in c["detail"], c["detail"]
+print("  policy report ok (offenses listed, secret not echoed)")
+'
+expect_exit "policy json report parses" 0 $?
+
+# ---------------------------------------------------------------- G15 policy bad manifest
+note "G15: bad policy manifest exits 2"
+"$VG" policy --manifest "$FIX/bad-policy.toml" --context "$FIX/ctx-clean.json" --no-log >/dev/null 2>&1
+expect_exit "bad policy manifest exits 2" 2 $?
+
+# ---------------------------------------------------------------- G16 policy scope na
+note "G16: scope mismatch is na, not a failure"
+WEBCTX="$WORK/web-ctx.json"
+echo '{"profile":"web","tool_calls":[{"name":"de_channel_send"}]}' >"$WEBCTX"
+"$VG" policy --emit json --manifest "$FIX/policy.toml" --context "$WEBCTX" --no-log 2>/dev/null \
+  | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["verdict"] == "pass", d
+na = [c for c in d["checks"] if c["result"] == "na"]
+assert any(c["name"] == "headless-no-channel" for c in na), [c["name"] for c in d["checks"]]
+print("  scope na ok")
+'
+expect_exit "policy scope na passes" 0 $?
+
+# ---------------------------------------------------------------- G17 policy ledger
+note "G17: policy run writes the ledger + status + stdin context"
+LEDGER2="$WORK/policy-ledger.jsonl"
+"$VG" policy --manifest "$FIX/policy.toml" --context "$FIX/ctx-violation.json" --log "$LEDGER2" >/dev/null 2>&1
+expect_exit "policy violation exits 1 (ledger mode)" 1 $?
+if [ -s "$LEDGER2" ]; then pass "policy ledger written"; else fail "policy ledger missing"; fi
+"$VG" status --log "$LEDGER2" 2>/dev/null | grep -q 'fail' && pass "policy status shows fail" || fail "policy status missing fail"
+echo '{"profile":"headless","tool_calls":[]}' | "$VG" policy --manifest "$FIX/policy.toml" --context - --no-log >/dev/null 2>&1
+expect_exit "policy context from stdin works" 0 $?
+
 # ---------------------------------------------------------------- summary
 note "SUMMARY"
 if [ "$FAILS" -eq 0 ]; then

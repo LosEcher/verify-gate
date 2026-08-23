@@ -1,0 +1,31 @@
+[meta]
+name = "policy-gate-demo"
+
+[[rule]]
+id = "headless-no-channel"
+desc = "headless 禁渠道工具"
+type = "tool-denylist"
+scope = { profile = "headless" }
+deny = ["de_channel_send", "de_notify"]
+
+[[rule]]
+id = "no-secret-in-output"
+type = "output-regex-deny"
+regex = 'sk-[A-Za-z0-9]{20,}'
+
+[[rule]]
+id = "per-turn-call-cap"
+type = "tool-call-limit"
+scope = { profile = "headless" }
+max = 60
+
+[[rule]]
+id = "retry-cap"
+type = "retry-limit"
+field = "llm_request"
+max = 5
+
+[[rule]]
+id = "no-prod-restart"
+type = "cmd-deny"
+regex = 'los\.sh\s+restart|restart\s+/governance'

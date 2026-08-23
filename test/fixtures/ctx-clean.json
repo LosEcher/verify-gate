@@ -1,0 +1,13 @@
+{
+  "profile": "headless",
+  "workspace": "/Users/echerlos/syncthing/project/dsfolder",
+  "retries": { "llm_request": 2, "tool_call": 1 },
+  "tool_calls": [
+    { "name": "bash", "args": "ls", "ts": "2026-08-23T12:00:01Z" },
+    { "name": "read", "args": "file.md", "ts": "2026-08-23T12:00:02Z" }
+  ],
+  "outputs": [
+    { "tool": "bash", "text": "ok" }
+  ],
+  "cmd_lines": ["pnpm dsh --profile headless \"task\""]
+}

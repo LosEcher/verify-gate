@@ -11,6 +11,7 @@ mod check;
 mod events;
 mod ledger;
 mod manifest;
+mod policy;
 mod report;
 
 use std::path::{Path, PathBuf};
@@ -19,9 +20,10 @@ use std::process::ExitCode;
 use crate::check::Res;
 use crate::events::Event;
 use crate::manifest::Manifest;
+use crate::policy::{PolicyManifest, RunContext};
 
 const USAGE: &str = "\
-verify-gate — declarative verification manifest executor.
+verify-gate — declarative verification manifest executor (+ policy-gate).
 
 Runs every assertion in a TOML manifest (file / cmd / http / git / json)
 against reality, aggregates a pass/fail report, and exits 0 (all pass),
@@ -30,6 +32,8 @@ Event-sourced ledger: .verify-gate/runs.jsonl.
 
 USAGE:
   verify-gate [OPTIONS] <manifest.toml>
+  verify-gate policy --manifest <policy.toml> --context <ctx.json|->
+                     [--emit json|pretty] [--log <path>] [--no-log]
 
 OPTIONS:
   --emit json|pretty     output format (default pretty)
@@ -40,6 +44,12 @@ OPTIONS:
   --help                 print this help
 
 SUBCOMMANDS:
+  policy                 evaluate a policy manifest (guardrails) against a
+                         run context (JSON on stdin when --context -):
+                         structured rule kinds (tool-denylist / tool-allowlist
+                         / output-regex-deny / tool-call-limit / retry-limit /
+                         cmd-deny), scoped rules evaluate to na when the
+                         scope does not match; exit 0 pass · 1 violation · 2 error
   status [--log <path>] [--limit N]
                         list runs; dangling runs (start without finish) are
                         shown as interrupted
@@ -51,6 +61,12 @@ EXIT CODES: 0 pass · 1 fail · 2 tool error.
 MANIFEST (TOML): a list of [[check]] entries. See README for the full
 reference. Every check needs: name, type (file|cmd|http|git|json) and the
 type-specific assertions. enabled = false marks a check as na.
+
+POLICY MANIFEST (TOML): a list of [[rule]] entries. See README for the full
+reference. Every rule needs: id, type (tool-denylist | tool-allowlist |
+output-regex-deny | tool-call-limit | retry-limit | cmd-deny) and the
+type-specific fields. scope = { profile = \"x\" } or { workspace = \"sub\" }
+marks a rule na when it does not match the context.
 ";
 
 #[derive(Debug)]
@@ -61,8 +77,18 @@ struct Config {
     manifest: PathBuf,
 }
 
+#[derive(Debug)]
+struct PolicyConfig {
+    emit: String,
+    log: Option<PathBuf>,
+    manifest: PathBuf,
+    /// "-" means read the run context from stdin.
+    context: PathBuf,
+}
+
 enum Cli {
     Run(Config),
+    Policy(PolicyConfig),
     Status { log: PathBuf, limit: usize },
     Log { run_id: String, log: PathBuf },
     Help,
@@ -80,6 +106,58 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut manifest: Option<PathBuf> = None;
     let mut limit = 20usize;
 
+    if argv[0] == "policy" {
+        let mut emit = "pretty".to_string();
+        let mut log: Option<PathBuf> = None;
+        let mut no_log = false;
+        let mut manifest: Option<PathBuf> = None;
+        let mut context: Option<PathBuf> = None;
+        let mut i = 1;
+        while i < argv.len() {
+            match argv[i].as_str() {
+                "--emit" => {
+                    emit = argv.get(i + 1).ok_or("--emit needs json|pretty")?.clone();
+                    if emit != "json" && emit != "pretty" {
+                        return Err(format!("--emit must be json|pretty, got {emit:?}"));
+                    }
+                    i += 1;
+                }
+                "--log" => {
+                    log = Some(PathBuf::from(argv.get(i + 1).ok_or("--log needs a path")?));
+                    i += 1;
+                }
+                "--no-log" => no_log = true,
+                "--manifest" => {
+                    manifest = Some(PathBuf::from(
+                        argv.get(i + 1).ok_or("--manifest needs a path")?,
+                    ));
+                    i += 1;
+                }
+                "--context" => {
+                    context = Some(PathBuf::from(
+                        argv.get(i + 1).ok_or("--context needs a path")?,
+                    ));
+                    i += 1;
+                }
+                "--help" | "-h" => return Ok(Cli::Help),
+                other => return Err(format!("policy: unknown arg {other:?}")),
+            }
+            i += 1;
+        }
+        let manifest = manifest.ok_or("policy: missing --manifest <policy.toml>")?;
+        let context = context.ok_or("policy: missing --context <ctx.json|->")?;
+        let log = if no_log {
+            None
+        } else {
+            Some(log.unwrap_or_else(|| PathBuf::from(".verify-gate/runs.jsonl")))
+        };
+        return Ok(Cli::Policy(PolicyConfig {
+            emit,
+            log,
+            manifest,
+            context,
+        }));
+    }
     if argv[0] == "status" {
         let mut logp = PathBuf::from(".verify-gate/runs.jsonl");
         let mut i = 1;
@@ -176,6 +254,13 @@ fn main() -> ExitCode {
             println!("verify-gate {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Ok(Cli::Policy(cfg)) => match cmd_policy(cfg) {
+            Ok(code) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("verify-gate: {e}");
+                ExitCode::from(2)
+            }
+        },
         Ok(Cli::Status { log, limit }) => match cmd_status(&log, limit) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -339,6 +424,113 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         eprintln!("verify-gate: tool error: {e}");
         return Ok(2);
     }
+    Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
+    let text = std::fs::read_to_string(&cfg.manifest)
+        .map_err(|e| format!("read policy manifest {}: {e}", cfg.manifest.display()))?;
+    let manifest: PolicyManifest = policy::parse(&text)
+        .map_err(|e| format!("policy manifest {}: {e}", cfg.manifest.display()))?;
+
+    let ctx_json = if cfg.context.as_os_str() == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|e| format!("read run context from stdin: {e}"))?;
+        s
+    } else {
+        std::fs::read_to_string(&cfg.context)
+            .map_err(|e| format!("read run context {}: {e}", cfg.context.display()))?
+    };
+    let ctx: RunContext = serde_json::from_str(&ctx_json)
+        .map_err(|e| format!("run context {}: {e}", cfg.context.display()))?;
+
+    let started_at = events::now_ms();
+    let run_id = events::new_run_id();
+    let version = env!("CARGO_PKG_VERSION");
+    let cwd_s = ctx.workspace.clone().unwrap_or_else(|| ".".to_string());
+    let manifest_s = cfg.manifest.to_string_lossy().into_owned();
+    let log = cfg.log.as_deref();
+
+    events::append(
+        log,
+        &Event::RunStart {
+            run_id: run_id.clone(),
+            version,
+            ts: started_at,
+            cwd: &cwd_s,
+            manifest: &manifest_s,
+            check_count: manifest.rule.len(),
+        },
+    )
+    .map_err(|e| format!("ledger write: {e}"))?;
+
+    let results = policy::evaluate(&manifest, &ctx).map_err(|e| format!("policy evaluate: {e}"))?;
+
+    let mut failed = 0usize;
+    let mut na = 0usize;
+    for (index, name, kind, outcome) in &results {
+        match outcome.result {
+            Res::Pass => {}
+            Res::Fail => failed += 1,
+            Res::Na => na += 1,
+        }
+        events::append(
+            log,
+            &Event::CheckStart {
+                run_id: &run_id,
+                index: *index,
+                name,
+                r#type: kind,
+            },
+        )
+        .map_err(|e| format!("ledger write: {e}"))?;
+        events::append(
+            log,
+            &Event::CheckFinish {
+                run_id: &run_id,
+                index: *index,
+                name,
+                result: outcome.result.as_str(),
+                duration_ms: outcome.duration_ms,
+                evidence_hash: &outcome.evidence_hash(),
+            },
+        )
+        .map_err(|e| format!("ledger write: {e}"))?;
+    }
+
+    let duration_ms = events::now_ms().saturating_sub(started_at);
+    let verdict = if failed == 0 { "pass" } else { "fail" };
+    events::append(
+        log,
+        &Event::RunFinish {
+            run_id: &run_id,
+            verdict,
+            failed,
+            na,
+            duration_ms,
+        },
+    )
+    .map_err(|e| format!("ledger write: {e}"))?;
+
+    let rep = report::build(
+        &manifest_s,
+        manifest.meta.as_ref().and_then(|m| m.name.as_deref()),
+        started_at,
+        duration_ms,
+        results,
+    );
+    if cfg.emit == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rep).map_err(|e| format!("report serialize: {e}"))?
+        );
+    } else {
+        print!("{}", report::render_pretty(&rep));
+    }
+
     Ok(if failed == 0 { 0 } else { 1 })
 }
 

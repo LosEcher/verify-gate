@@ -1,0 +1,13 @@
+{
+  "profile": "headless",
+  "workspace": "/Users/echerlos/syncthing/project/dsfolder",
+  "retries": { "llm_request": 7, "tool_call": 1 },
+  "tool_calls": [
+    { "name": "de_channel_send", "args": "{\"channels\":\"feishu\"}", "ts": "2026-08-23T12:00:01Z" },
+    { "name": "bash", "args": "bash tools/los.sh restart", "ts": "2026-08-23T12:00:02Z" }
+  ],
+  "outputs": [
+    { "tool": "bash", "text": "token=sk-abcdefghijklmnopqrstuvwxyz1234567890" }
+  ],
+  "cmd_lines": ["bash tools/los.sh restart"]
+}

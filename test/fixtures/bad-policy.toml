@@ -1,0 +1,4 @@
+[[rule]]
+id = "bad-re"
+type = "output-regex-deny"
+regex = "[unclosed"
