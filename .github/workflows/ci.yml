@@ -21,6 +21,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # Without this every run recompiles the whole graph on all three platforms.
+      # Baseline before this commit: ubuntu 49s / macos 93s / windows 99s per job.
+      # Keyed on the toolchain plus Cargo.lock, prunes stale artifacts, and keeps the
+      # saving on a failing run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Format check
         run: cargo fmt --check
       - name: Clippy
@@ -72,6 +79,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          # `--target <triple>` writes under target/<triple>, so the key must include
+          # the triple or the four rows would share a single entry.
+          key: ${{ matrix.target }}
       - name: Install musl toolchain (ring C build)
         if: matrix.install-musl == 'true'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
