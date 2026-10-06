@@ -63,3 +63,15 @@ strip = "symbols"
 # accelerates. Off here; the cost is a few seconds per crate when recompiling.
 [profile.dev]
 incremental = false
+# Debug info is the largest lever on dev-build disk here. Measured on this crate
+# (10-core M1 Pro, cold, fresh target dir):
+#   own crate debug=2, deps debug=2    8.27 s   372 M
+#   own crate debug=2, deps debug=0    7.34 s   225 M   <- chosen
+#   everything debug=0                 7.57 s   225 M
+#   everything "line-tables-only"      7.17 s   309 M
+# Wall-clock spread here is run-to-run noise (~5%); the disk spread is not. Dependencies are
+# where both the bytes and the codegen time live, so scoping the switch to `package."*"`
+# keeps file:line and locals for *this* crate at no extra cost.
+[profile.dev.package."*"]
+debug = 0
+strip = "none"
