@@ -75,15 +75,19 @@ jobs:
       - name: Install musl toolchain (ring C build)
         if: matrix.install-musl == 'true'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build release binary (${{ matrix.target }})
+      - name: Build dist binary (${{ matrix.target }})
+        # Shipped assets come from the `dist` profile, where the size knobs live.
+        # The test matrix above keeps plain `--release` for its compile check, and
+        # `--release` is now cargo's default profile, so only this tag-time
+        # packaging job pays the fat-LTO wall-clock cost.
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --profile dist --target ${{ matrix.target }}
       - name: Stage asset as ${{ matrix.asset }}
         shell: bash
         run: |
           mkdir -p dist
-          mv "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+          mv "target/${{ matrix.target }}/dist/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
