@@ -629,16 +629,18 @@ regex = "[unclosed"
         let m = manifest(
             r#"
 [[rule]]
-id = "dsfolder-only"
+id = "srv-demo-only"
 type = "retry-limit"
-scope = { workspace = "dsfolder" }
+scope = { workspace = "srv-demo" }
 field = "tool_call"
 max = 9
 "#,
         );
-        let hit = ctx(r#"{"workspace": "/Users/echerlos/syncthing/project/dsfolder"}"#);
+        // 用合成路径：scope.workspace 是**子串**匹配，不需要真实本机路径。
+        // （原夹具硬编码 /Users/... 的本机项目路径，既不可移植也把项目名带进工具层。）
+        let hit = ctx(r#"{"workspace": "/srv/work/srv-demo"}"#);
         assert_eq!(outcomes(&m, &hit), vec![Res::Pass]);
-        let miss = ctx(r#"{"workspace": "/Users/echerlos/Downloads/projects/cantool"}"#);
+        let miss = ctx(r#"{"workspace": "/srv/work/other-app"}"#);
         assert_eq!(outcomes(&m, &miss), vec![Res::Na]);
     }
 
