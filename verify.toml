@@ -17,7 +17,10 @@ regex = '(?m)^name[ \t]*=[ \t]*"verify-gate"$'
 name = "readme documents exit codes"
 type = "file"
 path = "README.md"
-contains = "all checks passed"
+# 断言锚在**三态语义**上，而不是某一版的措辞：
+# 2026-10-08 收紧后 exit 0 的含义是"至少一条真 pass 且无 fail"（不再是
+# "all checks passed"，因为全 na 现在是 inconclusive + exit 2）。
+contains = "inconclusive"
 
 [[check]]
 name = "sample fixture parseable"
