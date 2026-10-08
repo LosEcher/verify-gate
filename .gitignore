@@ -1,3 +1,8 @@
 /target
 /.verify-gate
 .DS_Store
+# 工具台账（本仓约定：与 /.verify-gate 一致不纳入版本控制）
+# 注意：dsfolder 的 .rust-los-gov 与 sandbox-run 的 .fmtguard **是**跟踪的，
+# 各仓对此自决；跨仓不一致已登记为待统一项。
+/.fmtguard
+/.rustopt
