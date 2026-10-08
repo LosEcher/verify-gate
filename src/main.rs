@@ -26,8 +26,14 @@ const USAGE: &str = "\
 verify-gate — declarative verification manifest executor (+ policy-gate).
 
 Runs every assertion in a TOML manifest (file / cmd / http / git / json)
-against reality, aggregates a pass/fail report, and exits 0 (all pass),
-1 (any fail), or 2 (tool error: usage, manifest parse, engine bug).
+against reality, aggregates a pass/fail/inconclusive report, and exits
+0 (all pass), 1 (any fail), or 2 (inconclusive OR tool error: usage,
+manifest parse, engine bug).
+
+NOTE: na (disabled check, or policy rule whose scope does not match) counts as
+neither pass nor fail. If EVERY check is na, the verdict is inconclusive and the
+exit code is 2 -- an all-na gate proves nothing and must never be read as a pass
+(2026-10-08: previously reported pass + exit 0).
 Event-sourced ledger: .verify-gate/runs.jsonl.
 
 USAGE:
@@ -49,14 +55,16 @@ SUBCOMMANDS:
                          structured rule kinds (tool-denylist / tool-allowlist
                          / output-regex-deny / tool-call-limit / retry-limit /
                          cmd-deny), scoped rules evaluate to na when the
-                         scope does not match; exit 0 pass · 1 violation · 2 error
+                         scope does not match; exit 0 pass · 1 violation ·
+                         2 error OR inconclusive (every rule na)
   status [--log <path>] [--limit N]
                         list runs; dangling runs (start without finish) are
                         shown as interrupted
   log <runId> [--log <path>]
                         full event chain of one run + rebuilt summary
 
-EXIT CODES: 0 pass · 1 fail · 2 tool error.
+EXIT CODES: 0 pass · 1 fail · 2 inconclusive-or-tool-error.
+              (2 = could-not-judge, never passed)
 
 MANIFEST (TOML): a list of [[check]] entries. See README for the full
 reference. Every check needs: name, type (file|cmd|http|git|json) and the
@@ -391,7 +399,32 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
     }
 
     let duration_ms = events::now_ms().saturating_sub(started_at);
-    let verdict = if failed == 0 { "pass" } else { "fail" };
+    // 三态收紧（2026-10-08）：**全部 na 不等于通过**。
+    //
+    // 背景：`na` 由两处产生 —— `disabled`（规则被关）与 `scope mismatch`
+    // （规则作用域不匹配，见 policy.rs:342-350）。二者都计入 report.checks，
+    // 因此 manifest.rs:182 的 "defines no checks（empty gate = false confidence）"
+    // 守卫**不会**触发。原先 `verdict = if failed == 0 { "pass" }` 会把
+    // "所有规则都 disabled / 都作用域不匹配" 报成 pass + exit 0 ⇒ **静默绿灯**，
+    // 与 2026-10-08 那次门禁假红（环境故障被当真实漂移）属同一类：状态被压平。
+    //
+    // 新判据：failed == 0 且 pass == 0 且 total > 0 ⇒ inconclusive（退出码 2）。
+    let total = results.len();
+    let pass = total.saturating_sub(failed + na);
+    let all_inconclusive = total > 0 && failed == 0 && pass == 0;
+    let verdict = if failed > 0 {
+        "fail"
+    } else if all_inconclusive {
+        "inconclusive"
+    } else {
+        "pass"
+    };
+    if all_inconclusive {
+        eprintln!(
+            "verify-gate: 全部 {total} 条检查都是 na（disabled 或 scope 不匹配）—— \
+             没有任何规则真正生效，不构成通过（inconclusive）"
+        );
+    }
     events::append(
         log,
         &Event::RunFinish {
@@ -409,6 +442,8 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         manifest.meta.as_ref().and_then(|m| m.name.as_deref()),
         started_at,
         duration_ms,
+        verdict,
+        pass,
         results,
     );
     if cfg.emit == "json" {
@@ -424,7 +459,14 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         eprintln!("verify-gate: tool error: {e}");
         return Ok(2);
     }
-    Ok(if failed == 0 { 0 } else { 1 })
+    // inconclusive（全 na）与 tool error 同用退出码 2：含义都是"判不了，不是通过"。
+    Ok(if failed > 0 {
+        1
+    } else if all_inconclusive {
+        2
+    } else {
+        0
+    })
 }
 
 fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
@@ -502,7 +544,23 @@ fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
     }
 
     let duration_ms = events::now_ms().saturating_sub(started_at);
-    let verdict = if failed == 0 { "pass" } else { "fail" };
+    // 与 cmd_run 同一判据（见 cmd_run 处的长注释）：全部 na ≠ 通过。
+    let total = results.len();
+    let pass = total.saturating_sub(failed + na);
+    let all_inconclusive = total > 0 && failed == 0 && pass == 0;
+    let verdict = if failed > 0 {
+        "fail"
+    } else if all_inconclusive {
+        "inconclusive"
+    } else {
+        "pass"
+    };
+    if all_inconclusive {
+        eprintln!(
+            "verify-gate: 全部 {total} 条检查都是 na（disabled 或 scope 不匹配）—— \
+             没有任何规则真正生效，不构成通过（inconclusive）"
+        );
+    }
     events::append(
         log,
         &Event::RunFinish {
@@ -520,6 +578,8 @@ fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
         manifest.meta.as_ref().and_then(|m| m.name.as_deref()),
         started_at,
         duration_ms,
+        verdict,
+        pass,
         results,
     );
     if cfg.emit == "json" {
@@ -531,7 +591,14 @@ fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
         print!("{}", report::render_pretty(&rep));
     }
 
-    Ok(if failed == 0 { 0 } else { 1 })
+    // inconclusive 与 tool error 同用退出码 2：含义都是"判不了，不是通过"。
+    Ok(if failed > 0 {
+        1
+    } else if all_inconclusive {
+        2
+    } else {
+        0
+    })
 }
 
 fn cmd_status(log: &Path, limit: usize) -> Result<(), String> {

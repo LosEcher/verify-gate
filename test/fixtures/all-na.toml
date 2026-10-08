@@ -1,0 +1,11 @@
+[meta]
+name = "verify-gate all-na fixture"
+
+# 只含一条 disabled 的 check ⇒ 唯一结果是 na。
+# 这个夹具的存在理由：G10 的 na.toml 是**混合**清单（na + 一个真 pass），
+# 因此永远不会暴露"全 na 被当 pass"——那正是 2026-10-08 之前的静默绿灯。
+[[check]]
+name = "only disabled"
+type = "cmd"
+cmd = "exit 1"
+enabled = false

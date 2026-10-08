@@ -206,6 +206,24 @@ note "G10: disabled checks are na, not failures"
 "$VG" --no-log "$FIX/na.toml" >/dev/null 2>&1
 expect_exit "na manifest exits 0" 0 $?
 
+# G10b 全部 na **不等于通过**（2026-10-08 修复的静默绿灯）。
+# 起因：verdict 原为 `if failed == 0 { "pass" }`，而 na 不计入 failed ⇒
+# "所有 check 都 disabled / 都作用域不匹配"会报 pass + exit 0。
+# 修法：failed == 0 且 pass == 0 且 total > 0 ⇒ verdict "inconclusive" + exit 2。
+"$VG" --no-log "$FIX/all-na.toml" >/dev/null 2>&1
+expect_exit "all-na manifest exits 2 (inconclusive, NOT pass)" 2 $?
+"$VG" --no-log --emit json "$FIX/all-na.toml" 2>/dev/null | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["verdict"] == "inconclusive", d["verdict"]
+assert d["passed"] == 0, d["passed"]
+assert all(c["result"] == "na" for c in d["checks"]), d["checks"]
+print("  all-na verdict/exit ok")
+'
+# 负向控制：混合清单（有真 pass）必须仍然是 pass + exit 0，不得因新判据误报。
+"$VG" --no-log "$FIX/na.toml" >/dev/null 2>&1
+expect_exit "mixed pass+na still exits 0 (no false inconclusive)" 0 $?
+
 # ---------------------------------------------------------------- G11 self-bootstrap
 note "G11: self-bootstrap (verify.toml on this repo)"
 "$VG" --no-log "$PWD/verify.toml" >/dev/null 2>&1

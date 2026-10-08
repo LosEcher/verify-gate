@@ -131,7 +131,7 @@ Check semantics:
 
 `verify-gate policy` evaluates a **policy manifest** (guardrails) against a
 **run context** (JSON: what a run actually did) and returns the same strict
-exit code: `0` no violations · `1` at least one violation · `2` tool error.
+exit code: `0` no violations · `1` at least one violation · `2` tool error **or inconclusive (every rule `na`)**.
 This is the Policy pillar of the agent kernel: mechanical, declarative
 guardrails instead of prose conventions. The shape is modeled on InstantDB's
 CEL permission system (parse-time validation, explicit allow/deny, scoped
@@ -236,9 +236,25 @@ command output stay out of the audit trail.
 
 | code | meaning |
 |---|---|
-| 0 | all checks passed (na checks do not count) |
+| 0 | at least one check **passed**, none failed (na checks do not count either way) |
 | 1 | at least one check failed |
-| 2 | tool error: usage, unparseable manifest, engine bug |
+| 2 | **inconclusive** (every check is `na`) **or** tool error: usage, unparseable manifest, engine bug |
+
+### `na` is not a pass
+
+A check is `na` when it is `enabled = false`, or (for policy rules) when its
+`scope` does not match the context. `na` counts as neither pass nor fail.
+
+**But a gate where *everything* is `na` proves nothing.** Since 2026-10-08 that
+case reports `verdict: "inconclusive"` and exits **2** (same code as a tool
+error, because both mean "could not judge"). Before that fix it reported
+`verdict: "pass"` and exited `0`, so a fully-disabled manifest — or one whose
+rules all failed their scope check — read as a green gate.
+
+The JSON report carries `passed` (count of real passes) alongside `checks[]`,
+so `passed: 0` with `verdict: "inconclusive"` is distinguishable from a real
+pass at the machine level. This mirrors the fail-closed guard for a manifest
+that defines *no* checks (`empty gate = false confidence`), which exits 2.
 
 Use the exit code as the gate — not the output text.
 
