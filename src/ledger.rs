@@ -7,6 +7,9 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct RunSummary {
     pub run_id: String,
+    /// Manifest this run was executed against. Two manifests can share one log
+    /// (`.verify-gate/runs.jsonl`), so history comparisons must be per-manifest.
+    pub manifest: Option<String>,
     pub started_ts: Option<u64>,
     pub finished_ts: Option<u64>,
     pub verdict: Option<String>,
@@ -31,6 +34,7 @@ pub enum Line {
         run_id: String,
         ts: u64,
         check_count: usize,
+        manifest: String,
     },
     CheckStart {
         run_id: String,
@@ -68,6 +72,7 @@ pub fn parse_line(raw: &str) -> Line {
             run_id: v["run_id"].as_str().unwrap_or("?").into(),
             ts: v["ts"].as_u64().unwrap_or(0),
             check_count: v["check_count"].as_u64().unwrap_or(0) as usize,
+            manifest: v["manifest"].as_str().unwrap_or("").into(),
         },
         "check.start" => Line::CheckStart {
             run_id: v["run_id"].as_str().unwrap_or("?").into(),
@@ -103,9 +108,11 @@ pub fn fold(lines: &[Line]) -> Vec<RunSummary> {
                 run_id,
                 ts,
                 check_count,
+                manifest,
             } => {
                 runs.entry(run_id.clone()).or_insert_with(|| RunSummary {
                     run_id: run_id.clone(),
+                    manifest: Some(manifest.clone()),
                     started_ts: Some(*ts),
                     finished_ts: None,
                     verdict: None,

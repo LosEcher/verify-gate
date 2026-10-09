@@ -236,9 +236,9 @@ command output stay out of the audit trail.
 
 | code | meaning |
 |---|---|
-| 0 | at least one check **passed**, none failed (na checks do not count either way) |
+| 0 | at least one check **passed**, none failed, and no check was newly silenced (na checks do not count either way) |
 | 1 | at least one check failed |
-| 2 | **inconclusive** (every check is `na`) **or** tool error: usage, unparseable manifest, engine bug |
+| 2 | **inconclusive** (every check is `na`, or a check was newly silenced) **or** tool error: usage, unparseable manifest, engine bug |
 
 ### `na` is not a pass
 
@@ -255,6 +255,32 @@ The JSON report carries `passed` (count of real passes) alongside `checks[]`,
 so `passed: 0` with `verdict: "inconclusive"` is distinguishable from a real
 pass at the machine level. This mirrors the fail-closed guard for a manifest
 that defines *no* checks (`empty gate = false confidence`), which exits 2.
+
+### Silence ratchet: what was judged must not stop being judged (2026-10-09)
+
+`enabled = false` is the one way to make a check disappear from a green run:
+`pass → na` leaves the verdict `pass` and the exit code `0`, with only a count
+in the report. A single check going quiet is not covered by the all-`na` rule
+above.
+
+So when a ledger exists, each run compares itself with the newest **completed**
+run of the **same manifest** and reports the checks that went from judged
+(`pass`/`fail`) to `na` in `silenced[]`. A non-empty `silenced[]` reports
+`verdict: "inconclusive"` and exits **2** — "no longer judged" is neither a pass
+nor a verified failure.
+
+Silencing a check on purpose is declared next to the check, not discovered later:
+
+```toml
+[meta]
+silence-ok = ["check name that is intentionally off"]
+```
+
+That list is the escape hatch, and it is a bounded, reviewable edit: without it,
+a deliberate silencing keeps exiting 2 and the stderr message names the checks.
+A first run (no history) never fires the ratchet, and policy rules are out of
+scope because there `na` can also come from a scope mismatch about the *context*
+rather than a decision in the manifest.
 
 Use the exit code as the gate — not the output text.
 

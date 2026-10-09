@@ -13,6 +13,7 @@ mod ledger;
 mod manifest;
 mod policy;
 mod report;
+mod silence;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -346,6 +347,15 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
     let mut failed = 0usize;
     let mut na = 0usize;
     let mut tool_error: Option<String> = None;
+    // Checks that are `na` *because this manifest disables them* (the only `na`
+    // source in verify mode). Kept separately from the count so the silence
+    // ratchet knows which names stopped being judged.
+    let mut disabled_now: Vec<String> = Vec::new();
+    let silence_ok: Vec<String> = manifest
+        .meta
+        .as_ref()
+        .map(|m| m.silence_ok.clone())
+        .unwrap_or_default();
 
     for (index, check_item) in manifest.check.iter().enumerate() {
         let name = check_item.name().to_string();
@@ -362,6 +372,7 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         .map_err(|e| format!("ledger write: {e}"))?;
 
         let outcome = if !check_item.enabled() {
+            disabled_now.push(name.clone());
             check::Outcome::na("disabled", 0)
         } else {
             let guarded = std::panic::catch_unwind(|| check::run(check_item, &cwd));
@@ -412,13 +423,38 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
     let total = results.len();
     let pass = total.saturating_sub(failed + na);
     let all_inconclusive = total > 0 && failed == 0 && pass == 0;
+
+    // 静音棘轮（2026-10-09）：`enabled = false` 能让一条**上次还在判**的检查
+    // 从绿灯里消失，而运行仍然 exit 0。判据：上一条同 manifest 的**已完成**运行里
+    // 该检查判过（pass/fail），这次是 na，且未在 `[meta] silence-ok` 里声明
+    // ⇒ inconclusive（exit 2）。"不再判"既不是通过，也不是真实漂移。
+    let silenced = match log {
+        Some(p) => match ledger::load(p) {
+            Ok(lines) => {
+                silence::newly_silenced(&lines, &run_id, &manifest_s, &disabled_now, &silence_ok)
+            }
+            // 台账读不动不是判定结论：宁可退回"没有基线可比"，也不误报静音。
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+
     let verdict = if failed > 0 {
         "fail"
-    } else if all_inconclusive {
+    } else if all_inconclusive || !silenced.is_empty() {
         "inconclusive"
     } else {
         "pass"
     };
+    if !silenced.is_empty() {
+        eprintln!(
+            "verify-gate: {} 条检查本次被静音（上次运行里还判过，这次 enabled = false）：{} —— \
+             不再判定不等于通过（inconclusive）。若是有意为之，请把名字写进 manifest 的 \
+             [meta] silence-ok。",
+            silenced.len(),
+            silenced.join(", ")
+        );
+    }
     if all_inconclusive {
         eprintln!(
             "verify-gate: 全部 {total} 条检查都是 na（disabled 或 scope 不匹配）—— \
@@ -437,7 +473,7 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
     )
     .map_err(|e| format!("ledger write: {e}"))?;
 
-    let rep = report::build(
+    let mut rep = report::build(
         &manifest_s,
         manifest.meta.as_ref().and_then(|m| m.name.as_deref()),
         started_at,
@@ -446,6 +482,9 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         pass,
         results,
     );
+    // 静音清单进 JSON 契约：下游消费的是 JSON，"不再判"必须在契约里可见，
+    // 而不是只出现在 stderr。
+    rep.silenced = silenced;
     if cfg.emit == "json" {
         println!(
             "{}",
@@ -459,10 +498,10 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         eprintln!("verify-gate: tool error: {e}");
         return Ok(2);
     }
-    // inconclusive（全 na）与 tool error 同用退出码 2：含义都是"判不了，不是通过"。
+    // inconclusive（全 na / 有新静音）与 tool error 同用退出码 2：含义都是"判不了，不是通过"。
     Ok(if failed > 0 {
         1
-    } else if all_inconclusive {
+    } else if all_inconclusive || !rep.silenced.is_empty() {
         2
     } else {
         0

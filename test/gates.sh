@@ -296,6 +296,104 @@ if [ -s "$LEDGER2" ]; then pass "policy ledger written"; else fail "policy ledge
 echo '{"profile":"headless","tool_calls":[]}' | "$VG" policy --manifest "$FIX/policy.toml" --context - --no-log >/dev/null 2>&1
 expect_exit "policy context from stdin works" 0 $?
 
+# ---------------------------------------------------------------- G18 silence ratchet
+note "G18: 静音棘轮 — 上次判过、这次 enabled=false ⇒ inconclusive（exit 2）"
+D="$WORK/g18"
+mkdir -p "$D"
+RLOG="$D/runs.jsonl"
+
+# 基线：两条都真判过
+cat > "$D/m.toml" <<'EOF'
+[meta]
+name = "g18 ratchet"
+
+[[check]]
+name = "judged then silenced"
+type = "cmd"
+cmd = "true"
+
+[[check]]
+name = "always judged"
+type = "cmd"
+cmd = "true"
+EOF
+( cd "$D" && "$VG" m.toml --log "$RLOG" >/dev/null 2>&1 )
+expect_exit "G18 baseline: both checks judged" 0 $?
+
+# arm 1：静音其一且未声明 ⇒ exit 2，且 JSON 点名
+cat > "$D/m.toml" <<'EOF'
+[meta]
+name = "g18 ratchet"
+
+[[check]]
+name = "judged then silenced"
+type = "cmd"
+cmd = "true"
+enabled = false
+
+[[check]]
+name = "always judged"
+type = "cmd"
+cmd = "true"
+EOF
+( cd "$D" && "$VG" m.toml --log "$RLOG" --emit json >"$D/a.json" 2>"$D/a.err" ); RC=$?
+expect_exit "G18 arm1: undeclared silence exits 2" 2 "$RC"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["verdict"] == "inconclusive", d["verdict"]
+assert d["silenced"] == ["judged then silenced"], d["silenced"]
+assert d["passed"] == 1, d["passed"]
+print("  silenced check named in JSON + verdict inconclusive")
+' "$D/a.json" || fail "G18 arm1: JSON does not name the silenced check"
+grep -q 'judged then silenced' "$D/a.err" && pass "G18 arm1: stderr names the silenced check" || fail "G18 arm1: stderr does not name it"
+
+# arm 2：同一状态但写进 [meta] silence-ok ⇒ 回到 pass + exit 0
+cat > "$D/m.toml" <<'EOF'
+[meta]
+name = "g18 ratchet"
+silence-ok = ["judged then silenced"]
+
+[[check]]
+name = "judged then silenced"
+type = "cmd"
+cmd = "true"
+enabled = false
+
+[[check]]
+name = "always judged"
+type = "cmd"
+cmd = "true"
+EOF
+( cd "$D" && "$VG" m.toml --log "$RLOG" --emit json >"$D/b.json" 2>/dev/null ); RC=$?
+expect_exit "G18 arm2: declared silence exits 0" 0 "$RC"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["verdict"] == "pass", d["verdict"]
+assert d["silenced"] == [], d["silenced"]
+print("  declared silence accepted (escape hatch works)")
+' "$D/b.json" || fail "G18 arm2: declared silence must not be reported"
+
+# arm 3（负向控制）：没有历史 ⇒ 不得误报（首跑无基线可判）
+cat > "$D/fresh.toml" <<'EOF'
+[meta]
+name = "g18 fresh"
+
+[[check]]
+name = "never judged before"
+type = "cmd"
+cmd = "true"
+enabled = false
+
+[[check]]
+name = "real pass"
+type = "cmd"
+cmd = "true"
+EOF
+( cd "$D" && "$VG" fresh.toml --log "$D/fresh.jsonl" >/dev/null 2>&1 )
+expect_exit "G18 arm3: no history ⇒ no false silence (negative control)" 0 $?
+
 # ---------------------------------------------------------------- summary
 note "SUMMARY"
 if [ "$FAILS" -eq 0 ]; then

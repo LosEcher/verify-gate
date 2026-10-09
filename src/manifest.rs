@@ -21,6 +21,14 @@ pub struct Manifest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Meta {
     pub name: Option<String>,
+    /// 允许"由**真判过**退化为不判"的检查名白名单（silence 棘轮的唯一逃生口）。
+    ///
+    /// `na` 在 verify 模式下只有一个来源：`enabled = false`。那已经是作者声明，
+    /// 但它同时也是"让一条失败的检查从绿灯里消失"的唯一手法。棘轮默认把
+    /// "上一条完成运行里判过、这次变 na"判为 inconclusive（exit 2）；要把某条
+    /// 检查**有意**静音，必须在这里列名——一次可评审、有上界的编辑。
+    #[serde(default, rename = "silence-ok")]
+    pub silence_ok: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -17,6 +17,10 @@ pub struct Report {
     /// 真正 pass 的条数。**此前报告里没有任何 na 计数**，于是"全 na 的 pass"
     /// 与"真 pass"在 JSON 上完全不可区分（2026-10-08 修复）。
     pub passed: usize,
+    /// 本轮新被静音的检查名（上一条完成运行里判过，这次 `enabled = false`），
+    /// 已扣掉 manifest `[meta] silence-ok` 里声明过的。非空即 verdict 为
+    /// `inconclusive`（exit 2）：**"不再判"不是"通过"**。
+    pub silenced: Vec<String>,
     pub checks: Vec<CheckReport>,
 }
 
@@ -65,6 +69,7 @@ pub fn build(
         duration_ms,
         verdict: verdict.to_string(),
         passed: pass,
+        silenced: Vec::new(),
         checks: check_reports,
     }
 }
