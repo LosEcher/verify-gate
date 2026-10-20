@@ -6,6 +6,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,12 @@ pub const OUTPUT_CAP: usize = 64 * 1024;
 pub enum Res {
     Pass,
     Fail,
+    /// 活着但超过 `idle_secs` 没有新输出（沉默超时）。
+    ///
+    /// 与 `Fail` 同属失败类（退出码 1），但字符串不同：`timeout` = 总预算耗尽，
+    /// `stalled` = 中途不出声。两者补救方向完全不同（加预算 vs 查死锁/等锁/等
+    /// 网络的点），压成一个标签会让报告指向错的嫌疑人。
+    Stalled,
     Na,
 }
 
@@ -27,6 +34,7 @@ impl Res {
         match self {
             Res::Pass => "pass",
             Res::Fail => "fail",
+            Res::Stalled => "stalled",
             Res::Na => "na",
         }
     }
@@ -58,6 +66,14 @@ impl Outcome {
     pub fn na(detail: impl Into<String>, duration_ms: u64) -> Self {
         Outcome {
             result: Res::Na,
+            detail: detail.into(),
+            duration_ms,
+        }
+    }
+    /// 沉默超时：不是 `na`（它确实被判了），也不是 `timeout`（总预算没用完）。
+    pub fn stalled(detail: impl Into<String>, duration_ms: u64) -> Self {
+        Outcome {
+            result: Res::Stalled,
             detail: detail.into(),
             duration_ms,
         }
@@ -187,8 +203,14 @@ fn snippet(s: &str, n: usize) -> String {
 // ---------------------------------------------------------------- cmd
 
 /// Spawn via the platform shell, read pipes concurrently (cap + keep tail),
-/// poll with a deadline, kill the direct child on timeout. Whole-tree kill is
-/// P1 (unirun delegation); P0 kills the direct child.
+/// poll with a deadline **and an optional silence deadline**, kill the direct
+/// child when either fires. Whole-tree kill is P1 (unirun delegation); P0 kills
+/// the direct child.
+///
+/// 两个期限的语义（刻意分开，见 `CmdCheck::idle_secs`）：
+/// - `timeout_secs` 先判（总预算优先），触发 ⇒ `timed out`；
+/// - `idle_secs > 0` 后判（自 spawn 起算，每读到一段输出就重置），触发 ⇒ `stalled`。
+///   manifest 校验已强制 `idle_secs < timeout_secs`，所以正常情况下静默先触发。
 fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
     let (shell, flag) = if cfg!(windows) {
         ("cmd", "/C")
@@ -208,12 +230,28 @@ fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
     let stderr = child.stderr.take().ok_or("no stderr pipe")?;
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
-    spawn_reader(stdout, Arc::clone(&out_buf));
-    spawn_reader(stderr, Arc::clone(&err_buf));
+    // 最后一次"有输出"的时刻（相对 start 的毫秒）。读线程写，主循环读；
+    // 只用于判定"沉默多久"，不参与内容判定。
+    let start = Instant::now();
+    let last_output_ms = Arc::new(AtomicU64::new(0));
+    spawn_reader(
+        stdout,
+        Arc::clone(&out_buf),
+        Arc::clone(&last_output_ms),
+        start,
+    );
+    spawn_reader(
+        stderr,
+        Arc::clone(&err_buf),
+        Arc::clone(&last_output_ms),
+        start,
+    );
 
     let deadline = Duration::from_secs(c.timeout_secs);
-    let start = Instant::now();
+    let idle_ms = c.idle_secs * 1000;
     let mut timed_out = false;
+    let mut stalled = false;
+    let mut silent_for_ms = 0u64;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -227,6 +265,17 @@ fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
                     timed_out = true;
                     break;
                 }
+                if idle_ms > 0 {
+                    let now_ms = start.elapsed().as_millis() as u64;
+                    let since = now_ms.saturating_sub(last_output_ms.load(Ordering::Relaxed));
+                    if since >= idle_ms {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        silent_for_ms = since;
+                        stalled = true;
+                        break;
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(e) => return Err(format!("wait on {:?}: {e}", c.cmd)),
@@ -236,6 +285,23 @@ fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
     let err = err_buf.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let stdout_s = String::from_utf8_lossy(&out).into_owned();
     let stderr_s = String::from_utf8_lossy(&err).into_owned();
+
+    // 沉默超时：内容断言没有意义（进程被打断，输出是残的），直接给出该结论。
+    if stalled {
+        return Ok(Outcome::stalled(
+            format!(
+                "stalled: no output for {silent_for_ms}ms (idle_secs={}, timeout_secs={}); \
+                 stdout bytes={}; stderr bytes={}; stdout tail: {}; stderr tail: {}",
+                c.idle_secs,
+                c.timeout_secs,
+                out.len(),
+                err.len(),
+                snippet(&stdout_s, 160),
+                snippet(&stderr_s, 160),
+            ),
+            0,
+        ));
+    }
 
     let exit_code = if timed_out {
         None
@@ -296,13 +362,21 @@ fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
     }
 }
 
-fn spawn_reader(mut pipe: impl Read + Send + 'static, buf: Arc<Mutex<Vec<u8>>>) {
+fn spawn_reader(
+    mut pipe: impl Read + Send + 'static,
+    buf: Arc<Mutex<Vec<u8>>>,
+    last_output_ms: Arc<AtomicU64>,
+    start: Instant,
+) {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
             match pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    // 先记"有输出"再落盘：让静默计时器立刻重置，不因加锁顺序
+                    // 把一次输出误算成沉默（反之则会漏判，代价更小但没必要）。
+                    last_output_ms.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
                     let mut b = buf.lock().unwrap_or_else(|p| p.into_inner());
                     b.extend_from_slice(&chunk[..n]);
                     if b.len() > OUTPUT_CAP {

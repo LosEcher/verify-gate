@@ -48,7 +48,12 @@ pub fn newly_silenced(
 
     let mut out: Vec<String> = Vec::new();
     for c in &previous.checks {
-        let judged_before = matches!(c.result.as_deref(), Some("pass") | Some("fail"));
+        // `stalled` 也是"判过"（沉默超时那次确实下了结论）。漏掉它会让
+        // "上次卡住、这次直接 disabled" 从棘轮里溜走——正是棘轮要防的形态。
+        let judged_before = matches!(
+            c.result.as_deref(),
+            Some("pass") | Some("fail") | Some("stalled")
+        );
         if judged_before
             && na_now.contains(&c.name)
             && !silence_ok.contains(&c.name)

@@ -394,6 +394,84 @@ EOF
 ( cd "$D" && "$VG" fresh.toml --log "$D/fresh.jsonl" >/dev/null 2>&1 )
 expect_exit "G18 arm3: no history ⇒ no false silence (negative control)" 0 $?
 
+# ---------------------------------------------------------------- G19 idle (silence) deadline
+# 沉默超时：`idle_secs` = 相邻两段输出之间的最大间隔，缺省关闭（0）。
+# 触发 ⇒ result = "stalled"，**计入失败（exit 1）**，与 timed out 同码不同标签。
+note "G19: idle_secs (silence deadline) — 卡死与慢必须分开判"
+cat >"$WORK/idle-stall.toml" <<'EOF'
+[[check]]
+name = "never prints"
+type = "cmd"
+cmd = "sleep 5"
+timeout_secs = 10
+idle_secs = 1
+EOF
+out=$("$VG" --no-log "$WORK/idle-stall.toml" 2>/dev/null); rc=$?
+expect_exit "G19 arm1: silent command ⇒ stalled (1)" 1 "$rc"
+case "$out" in
+  *stalled*) pass "G19 arm1: report labels it stalled (not timed out)" ;;
+  *) fail "G19 arm1: report does not label stalled: $out" ;;
+esac
+case "$out" in
+  *"timed out"*) fail "G19 arm1: stalled must not be reported as timed out" ;;
+  *) pass "G19 arm1: not mislabelled as timed out" ;;
+esac
+
+# 负向控制：慢但出声 ⇒ 必须 pass。这是"常报警=没报警"的那道闸门：
+# 若 idle 判据按总沉默（而不是按相邻间隔）算，慢命令会被误判成卡死。
+cat >"$WORK/idle-slow.toml" <<'EOF'
+[[check]]
+name = "slow but audible"
+type = "cmd"
+cmd = "sleep 1; echo a; sleep 1; echo b"
+timeout_secs = 10
+idle_secs = 3
+EOF
+( cd "$WORK" && "$VG" --no-log "$WORK/idle-slow.toml" >/dev/null 2>&1 )
+expect_exit "G19 arm2: slow-but-audible passes (negative control)" 0 $?
+
+# 负向控制：缺省关闭。2 秒不出声但没声明 idle_secs ⇒ 不得判卡死。
+cat >"$WORK/idle-off.toml" <<'EOF'
+[[check]]
+name = "quiet then ok, no idle declared"
+type = "cmd"
+cmd = "sleep 2; echo ok"
+timeout_secs = 10
+EOF
+( cd "$WORK" && "$VG" --no-log "$WORK/idle-off.toml" >/dev/null 2>&1 )
+expect_exit "G19 arm3: idle_secs absent ⇒ off by default (negative control)" 0 $?
+
+# 声明错误：idle_secs >= timeout_secs 永远够不到 ⇒ fail-closed 报 manifest bug（exit 2）。
+cat >"$WORK/idle-bad.toml" <<'EOF'
+[[check]]
+name = "idle never fires"
+type = "cmd"
+cmd = "true"
+timeout_secs = 2
+idle_secs = 2
+EOF
+( cd "$WORK" && "$VG" --no-log "$WORK/idle-bad.toml" >/dev/null 2>&1 )
+expect_exit "G19 arm4: idle_secs >= timeout_secs is a manifest error (2)" 2 $?
+
+# JSON 契约：stalled 必须是可数的独立标签，且计入 verdict=fail。
+cat >"$WORK/idle-json.toml" <<'EOF'
+[[check]]
+name = "never prints"
+type = "cmd"
+cmd = "sleep 5"
+timeout_secs = 10
+idle_secs = 1
+EOF
+"$VG" --no-log --emit json "$WORK/idle-json.toml" >"$WORK/idle.json" 2>/dev/null
+if grep -q '"result": "stalled"' "$WORK/idle.json" && grep -q '"stalled": 1' "$WORK/idle.json"; then
+  pass "G19 arm5: JSON carries result=stalled and stalled count"
+else
+  fail "G19 arm5: JSON missing stalled label/count: $(head -c 300 "$WORK/idle.json")"
+fi
+grep -q '"verdict": "fail"' "$WORK/idle.json" \
+  && pass "G19 arm5: stalled counts as failure (verdict=fail)" \
+  || fail "G19 arm5: verdict should be fail"
+
 # ---------------------------------------------------------------- summary
 note "SUMMARY"
 if [ "$FAILS" -eq 0 ]; then

@@ -345,6 +345,7 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
 
     let mut results: Vec<(usize, String, String, check::Outcome)> = Vec::new();
     let mut failed = 0usize;
+    let mut stalled = 0usize;
     let mut na = 0usize;
     let mut tool_error: Option<String> = None;
     // Checks that are `na` *because this manifest disables them* (the only `na`
@@ -389,9 +390,15 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
                 }
             }
         };
-        match outcome.result {
+        // `stalled`（沉默超时）与 `fail` 同为失败：都意味着这条检查没通过其声明的
+        // 契约。区别只在标签与补救方向，所以它计入 failed，同时另计一份给报告。
+        match &outcome.result {
             Res::Pass => {}
             Res::Fail => failed += 1,
+            Res::Stalled => {
+                failed += 1;
+                stalled += 1;
+            }
             Res::Na => na += 1,
         }
         events::append(
@@ -455,10 +462,17 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
             silenced.join(", ")
         );
     }
+    if stalled > 0 {
+        eprintln!(
+            "verify-gate: {stalled} 条检查 stalled —— 活着但超过声明的 idle_secs 没有新输出\
+             （与 timed out 不同：总预算没用完，是中途不出声）。按失败计（exit 1）；\
+             排查方向是死锁/等锁/等网络/等 stdin，而不是加 timeout_secs。"
+        );
+    }
     if all_inconclusive {
         eprintln!(
-            "verify-gate: 全部 {total} 条检查都是 na（disabled 或 scope 不匹配）—— \
-             没有任何规则真正生效，不构成通过（inconclusive）"
+            "verify-gate: 全部 {total} 条检查都是 na 或 stalled（disabled、scope 不匹配、\
+             或没有真正生效）—— 没有任何规则真正判过，不构成通过（inconclusive）"
         );
     }
     events::append(
@@ -556,6 +570,9 @@ fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
         match outcome.result {
             Res::Pass => {}
             Res::Fail => failed += 1,
+            // policy 目前不执行命令、不会产生 stalled；真出现了也按失败算（fail-closed），
+            // 不让新状态静默漏计。
+            Res::Stalled => failed += 1,
             Res::Na => na += 1,
         }
         events::append(

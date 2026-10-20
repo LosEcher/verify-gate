@@ -113,6 +113,25 @@ pub struct CmdCheck {
     pub stderr_regex: Option<String>,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// 沉默阈值（秒）：相邻两段输出之间的最大间隔，**0 = 关闭**（缺省关闭）。
+    ///
+    /// 与 `timeout_secs` 是两个不同的量，不能合并成一个：
+    /// - `timeout_secs` = 这条检查的总预算（含启动、编译、连接、全部迭代）；
+    /// - `idle_secs` = "活着但不出声"的期限（借用 vivo 蓝河内核 `*.checker` 的
+    ///   `NEWLINE-TIMEOUT`）。卡死（等锁、等网络、等 stdin）与"慢"在只有总超时
+    ///   时无法区分，都要等总预算耗尽，且都报成 timed out。
+    ///
+    /// **为什么刻意默认关闭**：没有"预期输出节奏"的声明时，"没有输出"不构成
+    /// 卡住的证据。默认开启会把"慢"判成"卡"，而**常报警等于没报警**（先例：
+    /// `rust-budget-check` 阈值设错时五仓全报）。阈值必须由作者按这条命令的真实
+    /// 节奏写进 manifest —— 数字在文件里可 review、可 grep、可 diff，而不是藏在
+    /// 全局常量或"场景推断"里。
+    ///
+    /// 触发后的判定：`result = "stalled"`，**计入失败**（与 `timeout` 同一退出码
+    /// 1，但字符串不同）—— 声明了"至少每 N 秒要有输出"而没做到，是这条检查
+    /// 契约的失败，不是"判不了"。
+    #[serde(default)]
+    pub idle_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,6 +240,16 @@ fn validate(m: &Manifest) -> Result<(), ManifestError> {
                 }
                 if c.timeout_secs == 0 {
                     return Err(ManifestError(format!("{ctx}: timeout_secs must be > 0")));
+                }
+                // 静默判据必须**严小于**总超时。否则它永远够不到（总超时先触发），
+                // 声明了却永不生效 —— 这正是"空即通过"那一族，必须 fail-closed
+                // 报成作者 bug，而不是安静地退化成只有总超时。
+                if c.idle_secs > 0 && c.idle_secs >= c.timeout_secs {
+                    return Err(ManifestError(format!(
+                        "{ctx}: idle_secs ({}) must be < timeout_secs ({}); \
+                         否则静默判据永远不会先触发",
+                        c.idle_secs, c.timeout_secs
+                    )));
                 }
                 for re in [&c.stdout_regex, &c.stderr_regex].into_iter().flatten() {
                     validate_regex(re, &ctx)?;

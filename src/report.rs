@@ -17,6 +17,9 @@ pub struct Report {
     /// 真正 pass 的条数。**此前报告里没有任何 na 计数**，于是"全 na 的 pass"
     /// 与"真 pass"在 JSON 上完全不可区分（2026-10-08 修复）。
     pub passed: usize,
+    /// 沉默超时的条数（`result = "stalled"`）。**计入失败**（exit 1），但在
+    /// JSON 里单列：`timed out` 与 `stalled` 的补救方向不同，不能压成一个数。
+    pub stalled: usize,
     /// 本轮新被静音的检查名（上一条完成运行里判过，这次 `enabled = false`），
     /// 已扣掉 manifest `[meta] silence-ok` 里声明过的。非空即 verdict 为
     /// `inconclusive`（exit 2）：**"不再判"不是"通过"**。
@@ -60,6 +63,12 @@ pub fn build(
             detail: o.detail,
         })
         .collect();
+    // 沉默超时单列：它与 fail 同一退出码，但补救方向不同（查死锁 vs 加预算），
+    // 所以在 JSON 里也必须是一个可数的独立标签。
+    let stalled = check_reports
+        .iter()
+        .filter(|c| c.result == "stalled")
+        .count();
     Report {
         tool: "verify-gate",
         version: env!("CARGO_PKG_VERSION").into(),
@@ -69,6 +78,7 @@ pub fn build(
         duration_ms,
         verdict: verdict.to_string(),
         passed: pass,
+        stalled,
         silenced: Vec::new(),
         checks: check_reports,
     }
@@ -88,10 +98,11 @@ pub fn render_pretty(r: &Report) -> String {
     let failed = r.checks.iter().filter(|c| c.result == "fail").count();
     let na = r.checks.iter().filter(|c| c.result == "na").count();
     out.push_str(&format!(
-        "  {} checks · {} passed · {} failed · {} na · {} ms\n",
+        "  {} checks · {} passed · {} failed · {} stalled · {} na · {} ms\n",
         r.checks.len(),
         r.passed,
         failed,
+        r.stalled,
         na,
         r.duration_ms
     ));
@@ -99,6 +110,8 @@ pub fn render_pretty(r: &Report) -> String {
         let mark = match c.result.as_str() {
             "pass" => "✔",
             "fail" => "✘",
+            // 沉默超时：是失败，但不是"退出了但不对"，用不同符号让它在一行里可辨。
+            "stalled" => "⏳",
             _ => "·",
         };
         out.push_str(&format!(

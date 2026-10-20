@@ -74,6 +74,8 @@ cmd = "cargo test"
 exit = 0                      # default 0
 stdout_contains = "test result: ok"
 timeout_secs = 180            # default 60; a timeout is a FAILURE, not a tool error
+# idle_secs = 30              # optional: max silence between outputs (absent = off).
+                              # Must be < timeout_secs; firing = "stalled" (also a failure).
 
 # --- http -------------------------------------------------------------
 [[check]]
@@ -119,7 +121,8 @@ Check semantics:
 - `cmd` — `cmd` (required, run through the platform shell: `sh -c` on unix,
   `cmd /C` on Windows); `exit` (default `0`); optional `stdout_contains` /
   `stderr_contains` / `stdout_regex` / `stderr_regex`; `timeout_secs`
-  (default `60`, output capped at 64 KiB keep-tail).
+  (default `60`, output capped at 64 KiB keep-tail); `idle_secs` (default `0` =
+  off) — max silence between outputs, see "Silence deadline" below.
 - `http` — `url` (required); `status` (default `200`); optional
   `body_contains`; network errors count as failures.
 - `git` — `expect` `clean` (worktree has no uncommitted changes) or `branch`
@@ -237,8 +240,36 @@ command output stay out of the audit trail.
 | code | meaning |
 |---|---|
 | 0 | at least one check **passed**, none failed, and no check was newly silenced (na checks do not count either way) |
-| 1 | at least one check failed |
+| 1 | at least one check failed — including `stalled` (silence deadline, see below) |
 | 2 | **inconclusive** (every check is `na`, or a check was newly silenced) **or** tool error: usage, unparseable manifest, engine bug |
+
+### Silence deadline (`idle_secs`): a hang is not "slow" (2026-10-20)
+
+`timeout_secs` only answers "is the total budget used up". A command stuck on a
+lock, a socket, or stdin stays silent and eats the whole budget, and the report
+says `timed out` — the same label as a genuinely slow run, pointing the reader
+at "raise the timeout" instead of "find the deadlock".
+
+`idle_secs` closes that gap: **the maximum gap between two chunks of output**
+(counted from spawn, reset on every chunk). When it fires the result is
+`stalled`, which **counts as a failure** (exit 1) but keeps its own label.
+
+- **Off by default.** With no declared output cadence, "no output" is not
+  evidence of a hang. Defaulting it on turns "slow" into "stuck", and a gate
+  that cries wolf is a gate people learn to ignore.
+- **Must be `< timeout_secs`.** Otherwise it can never fire (the total timeout
+  wins first); manifest validation rejects that as an authoring bug (exit 2)
+  rather than letting the declaration silently degrade into "timeout only".
+- **How to pick the number:** observe the real max gap once, then use 2–3× that.
+  Order-of-magnitude starting points by scenario — build/test 30–60s, network
+  fetch 15–30s, pure compute 10–20s — but **the number belongs in the
+  manifest** (reviewable, greppable, diffable). Deliberately no "infer the
+  cadence from the command type": a heuristic that silently changes verdicts is
+  worse than a number a human wrote down.
+- **The two failures need different fixes**, which is why the labels differ:
+  `timed out` → the budget is too small or the work is genuinely long;
+  `stalled` → it stopped talking mid-run; look for a deadlock, a lock, a socket,
+  or a read from stdin.
 
 ### `na` is not a pass
 
