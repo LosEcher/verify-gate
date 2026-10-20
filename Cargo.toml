@@ -8,6 +8,13 @@ repository = "https://github.com/LosEcher/verify-gate"
 keywords = ["verify", "assert", "agent", "gate", "check"]
 categories = ["development-tools", "command-line-utilities"]
 
+# `cargo package` ships `scripts/` by default, and everything in there is
+# fleet-internal: the build-profile writer, the artifact cleaner, and the Miri
+# gate (which probes ~/.cargo and a Miri sysroot and asserts this repo's test
+# floor — a consumer has no use for any of them). Nothing in scripts/ is
+# referenced by the README, so the whole directory goes.
+exclude = ["scripts/"]
+
 [dependencies]
 regex = "1"
 serde = { version = "1", features = ["derive"] }

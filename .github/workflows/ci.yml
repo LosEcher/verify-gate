@@ -43,6 +43,30 @@ jobs:
         shell: bash
         run: bash test/gates.sh
 
+  # Miri under Tree Borrows, restricted to the syscall-free pure core
+  # (`policy` / `manifest` / `silence`). Miri cannot execute FFI or real
+  # syscalls, so `check` (spawns children, needs them for idle_secs) and
+  # `ledger` (writes) are out of scope by construction. Keep this list in sync
+  # with scripts/miri-pure-core.conf; the gate asserts a test floor so a filter
+  # that stops matching fails instead of reporting "0 passed, ok".
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly + Miri
+        run: |
+          rustup toolchain install nightly --profile minimal --component miri --component rust-src
+          cargo +nightly miri --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: miri
+          cache-on-failure: true
+      - name: Gate self-test (negative controls)
+        run: bash scripts/miri-pure-core.sh --self-test
+      - name: Miri pure core (Tree Borrows)
+        run: bash scripts/miri-pure-core.sh
+
   # Release assets follow the fixed `verify-gate-<os>-<arch>` naming contract
   # (consumers resolve the right file deterministically; each matrix row
   # builds for an explicit rustc target matching the runner's native arch).
