@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::fmt;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub meta: Option<Meta>,
     #[serde(default)]
@@ -19,6 +20,7 @@ pub struct Manifest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Meta {
     pub name: Option<String>,
     /// 允许"由**真判过**退化为不判"的检查名白名单（silence 棘轮的唯一逃生口）。
@@ -78,6 +80,7 @@ pub fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileCheck {
     pub name: String,
     #[serde(default = "default_true")]
@@ -95,6 +98,7 @@ pub struct FileCheck {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CmdCheck {
     pub name: String,
     #[serde(default = "default_true")]
@@ -135,6 +139,7 @@ pub struct CmdCheck {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCheck {
     pub name: String,
     #[serde(default = "default_true")]
@@ -150,6 +155,7 @@ pub struct HttpCheck {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitCheck {
     pub name: String,
     #[serde(default = "default_true")]
@@ -163,6 +169,7 @@ pub struct GitCheck {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JsonCheck {
     pub name: String,
     #[serde(default = "default_true")]
@@ -325,6 +332,46 @@ cmd = "true"
         assert_eq!(m.check[0].kind(), "file");
         assert!(m.check[0].enabled());
         assert_eq!(m.check[1].kind(), "cmd");
+    }
+
+    /// 拼错的键必须 fail-closed 报错，且错误要点名那个键。
+    ///
+    /// 为什么这条是门禁而不是风格：`contians = "x"` 被静默忽略时，这条检查
+    /// 从"断言内容包含 x"退化成"只判文件存在"——作者以为在验行为，实际通过的
+    /// 是一条弱得多的判据。这是"空即通过"那一族的变体：判据被写错而没人发现。
+    /// 反例先例：manifest 里 `idle_secs` 写成 `idle_sec` 一样会静默失效。
+    #[test]
+    fn unknown_key_in_check_rejected() {
+        let bad = r#"
+[[check]]
+name = "c"
+type = "file"
+path = "a"
+contians = "x"
+"#;
+        let err = parse(bad).expect_err("unknown check key rejected");
+        assert!(
+            err.0.contains("contians"),
+            "error must name the offending key: {}",
+            err.0
+        );
+    }
+
+    /// `[meta]` 的 `silence-ok` 是连字符；写成下划线是真实会发生的拼错，
+    /// 而它的后果是"静音白名单静默为空"，即棘轮永远咬人却没人知道为什么。
+    #[test]
+    fn unknown_key_in_meta_rejected() {
+        let bad = r#"
+[meta]
+name = "t"
+silence_ok = ["x"]
+"#;
+        let err = parse(bad).expect_err("unknown meta key rejected");
+        assert!(
+            err.0.contains("silence_ok"),
+            "error must name the offending key: {}",
+            err.0
+        );
     }
 
     #[test]

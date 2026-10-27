@@ -472,6 +472,45 @@ grep -q '"verdict": "fail"' "$WORK/idle.json" \
   && pass "G19 arm5: stalled counts as failure (verdict=fail)" \
   || fail "G19 arm5: verdict should be fail"
 
+# ------------------------------------------------- G20 unknown keys fail closed
+# 拼错的键若被静默忽略，这条检查就从"断言内容"退化成"只判存在"——
+# 作者以为在验行为，实际通过的是一条弱得多的判据（"空即通过"族的变体）。
+# 借自 blaze 的 `cargo/directives.rs`：未知键一律报错并**点名那个键**。
+note "G20: 未知键 fail-closed（拼错的判据不能静默降级成更弱的判据）"
+cat >"$WORK/typo.toml" <<'EOF'
+[[check]]
+name = "c"
+type = "file"
+path = "a.txt"
+contians = "x"
+EOF
+"$VG" --no-log "$WORK/typo.toml" >"$WORK/typo.out" 2>"$WORK/typo.err"
+expect_exit "G20 arm1: unknown check key is a manifest error (2)" 2 $?
+if grep -q "contians" "$WORK/typo.err"; then
+  pass "G20 arm1: error names the offending key"
+else
+  fail "G20 arm1: error should name 'contians': $(head -c 300 "$WORK/typo.err")"
+fi
+
+# 负向控制①：收紧不得放走正常清单。
+"$VG" --no-log "$FIX/pass.toml" >/dev/null 2>&1
+expect_exit "G20 arm2: valid manifest still exits 0 (negative control)" 0 $?
+
+# 负向控制②：`[meta] silence-ok` 是连字符；写成下划线才是错。
+# 这条把"我们以为的拼错"与"真的合法"分开，防把合法键一起咬掉。
+cat >"$WORK/silence-hyphen.toml" <<'EOF'
+[meta]
+name = "g20 hyphen"
+silence-ok = ["c"]
+
+[[check]]
+name = "c"
+type = "cmd"
+cmd = "true"
+EOF
+"$VG" --no-log "$WORK/silence-hyphen.toml" >/dev/null 2>&1
+expect_exit "G20 arm3: hyphenated silence-ok accepted (negative control)" 0 $?
+
 # ---------------------------------------------------------------- summary
 note "SUMMARY"
 if [ "$FAILS" -eq 0 ]; then
