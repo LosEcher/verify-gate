@@ -76,6 +76,10 @@ stdout_contains = "test result: ok"
 timeout_secs = 180            # default 60; a timeout is a FAILURE, not a tool error
 # idle_secs = 30              # optional: max silence between outputs (absent = off).
                               # Must be < timeout_secs; firing = "stalled" (also a failure).
+# allow_missing = true        # optional: if the binary is missing, THAT is this check
+                              # failing (exit 1). Default false ⇒ missing binary is
+                              # "env_missing" (inconclusive, exit 2), because a path
+                              # problem is not a repository problem.
 
 # --- http -------------------------------------------------------------
 [[check]]
@@ -241,7 +245,50 @@ command output stay out of the audit trail.
 |---|---|
 | 0 | at least one check **passed**, none failed, and no check was newly silenced (na checks do not count either way) |
 | 1 | at least one check failed — including `stalled` (silence deadline, see below) |
-| 2 | **inconclusive** (every check is `na`, or a check was newly silenced) **or** tool error: usage, unparseable manifest, engine bug |
+| 2 | **inconclusive**: every check is `na`, a check was newly silenced, a check is `env_missing`, or a check is `tool_error` **or** tool error: usage, unparseable manifest, engine bug |
+
+The distinction between 1 and 2 is the whole point of the tool: **"the thing is
+wrong" and "I could not judge" must never be the same code**, because callers
+(the `rust-repo-gate-run` ledger, CI, agents) act on it. A shell that cannot find
+`cargo` is not a repository with a broken test.
+
+### `env_missing`: a command that never ran is not a failure (2026-10-30)
+
+If the shell could not run the command at all, the check did not observe
+anything — so it cannot be a failure. Detection (see `check::missing_command`):
+
+- exit code `126` (found, not executable), `127` (not found) on POSIX shells,
+  `9009` on Windows `cmd`;
+- or strong text: `command not found`, `is not recognized as an internal or
+  external command`, `The term '…' is not recognized`;
+- but **not** `No such file or directory` alone — that is usually the command
+  itself failing to open a file, which is a real failure.
+
+Result label `env_missing`, `verdict: "inconclusive"`, exit code **2**. The JSON
+detail names the missing command, and stderr names the check, so the person
+fixing `PATH` knows which one to look at.
+
+Two escape hatches, because both are legitimate authoring intents:
+
+| manifest | meaning |
+|---|---|
+| `exit = 127` | "this command is *expected* to be absent" → 127 is the success criterion |
+| `allow_missing = true` | "if it is missing, that **is** this check failing" (still exit 1) |
+
+Why this exists (measured twice): on 2026-10-08 and again on 2026-10-26/27 the
+host that spawns verifications lost `~/.cargo/bin` from `PATH`. Fourteen
+`cargo …` checks failed with exit 127 and were recorded as product drift, which
+burnt six planning rounds on 2026-10-08 and two consecutive nightly runs on
+2026-10-26/27. The state was flattened at the layer below this tool; this label
+is that layer's fix.
+
+### `tool_error`: engine faults are labelled, not disguised as `fail`
+
+An I/O error, a runtime regex failure, or a missing pipe means verify-gate never
+judged the check. It is reported as `result: "tool_error"` with
+`verdict: "inconclusive"` and exit code 2 (previously the report said `fail`
+while the exit code said 2 — two representations of one state, and JSON-only
+consumers saw the wrong one).
 
 ### Silence deadline (`idle_secs`): a hang is not "slow" (2026-10-20)
 

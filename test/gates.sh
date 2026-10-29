@@ -511,6 +511,84 @@ EOF
 "$VG" --no-log "$WORK/silence-hyphen.toml" >/dev/null 2>&1
 expect_exit "G20 arm3: hyphenated silence-ok accepted (negative control)" 0 $?
 
+# ------------------------------------------------- G21 env_missing ≠ drift
+# 2026-10-26/27 实测：宿主 PATH 缺 `~/.cargo/bin`，14 条 `cargo …` 判据全部以
+# `exit 127 / command not found` 失败，被记成"产品漂移"并触发无效修复计划。
+# 判据：命令**没跑成**（126/127/9009）⇒ result=env_missing、verdict=inconclusive、
+# 退出码 2；且必须**点名**缺的命令（修 PATH 的人要按名字找）。
+note "G21: 执行面缺件是判不了（env_missing），不是漂移"
+cat >"$WORK/env-missing.toml" <<'EOF'
+[[check]]
+name = "cargo that is not installed"
+type = "cmd"
+cmd = "definitely-not-a-real-command-xyz --version"
+EOF
+"$VG" --no-log --emit json "$WORK/env-missing.toml" >"$WORK/env.json" 2>"$WORK/env.err"
+expect_exit "G21 arm1: missing command exits 2 (not 1)" 2 $?
+grep -q '"result": "env_missing"' "$WORK/env.json" \
+  && pass "G21 arm1: JSON labels it env_missing (not fail)" \
+  || fail "G21 arm1: JSON result should be env_missing: $(head -c 200 "$WORK/env.json")"
+grep -q '"verdict": "inconclusive"' "$WORK/env.json" \
+  && pass "G21 arm1: verdict is inconclusive" \
+  || fail "G21 arm1: verdict should be inconclusive"
+grep -q '"env_missing": 1' "$WORK/env.json" \
+  && pass "G21 arm1: env_missing is a countable field" \
+  || fail "G21 arm1: JSON missing env_missing count"
+# 点名分两层：JSON 的 detail 必须带**命令名**（从 shell 报错里抽出来的），
+# stderr 必须带**检查名**（人按名字去找那条要修 PATH 的检查）。
+grep -q "definitely-not-a-real-command-xyz" "$WORK/env.json" \
+  && pass "G21 arm1: detail names the missing command" \
+  || fail "G21 arm1: detail should name the missing command"
+grep -q "cargo that is not installed" "$WORK/env.err" \
+  && pass "G21 arm1: stderr names the env_missing check" \
+  || fail "G21 arm1: stderr should name the env_missing check: $(head -c 200 "$WORK/env.err")"
+if grep -q "都是 na 或 stalled" "$WORK/env.err"; then
+  fail "G21 arm1: must not blame na when the cause is a missing binary (state flattening)"
+else
+  pass "G21 arm1: does not mis-blame na/stalled"
+fi
+
+# 负向控制①：manifest 显式声明 `exit = 127` ⇒ 作者的意思是"它就该不存在"，按失败计。
+cat >"$WORK/env-expected127.toml" <<'EOF'
+[[check]]
+name = "command must be absent"
+type = "cmd"
+cmd = "definitely-not-a-real-command-xyz"
+exit = 127
+EOF
+"$VG" --no-log "$WORK/env-expected127.toml" >/dev/null 2>&1
+expect_exit "G21 arm2: declared exit = 127 still passes (negative control)" 0 $?
+
+# 负向控制②：`allow_missing = true` ⇒ 缺件按这条检查**失败**计（exit 1），不是判不了。
+cat >"$WORK/env-allow-missing.toml" <<'EOF'
+[[check]]
+name = "this binary is required"
+type = "cmd"
+cmd = "definitely-not-a-real-command-xyz"
+allow_missing = true
+EOF
+"$VG" --no-log "$WORK/env-allow-missing.toml" >/dev/null 2>&1
+expect_exit "G21 arm3: allow_missing turns it back into a failure (1)" 1 $?
+
+# 负向控制③：真失败（命令跑了、退出码不对）**绝不能**被判成缺件 ——
+# 否则"环境"桶会吞掉真问题（与 G19 的负向控制同一条纪律）。
+cat >"$WORK/env-real-fail.toml" <<'EOF'
+[[check]]
+name = "command runs and fails"
+type = "cmd"
+cmd = "sh -c 'echo boom >&2; exit 3'"
+EOF
+"$VG" --no-log --emit json "$WORK/env-real-fail.toml" >"$WORK/real.json" 2>/dev/null
+expect_exit "G21 arm4: real failure still exits 1 (negative control)" 1 $?
+grep -q '"result": "fail"' "$WORK/real.json" \
+  && pass "G21 arm4: real failure stays fail" \
+  || fail "G21 arm4: real failure must stay fail"
+if grep -q '"result": "env_missing"' "$WORK/real.json"; then
+  fail "G21 arm4: a command that ran and failed must never be labelled env_missing"
+else
+  pass "G21 arm4: no env_missing label on a real failure"
+fi
+
 # ---------------------------------------------------------------- summary
 note "SUMMARY"
 if [ "$FAILS" -eq 0 ]; then

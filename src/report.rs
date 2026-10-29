@@ -20,6 +20,12 @@ pub struct Report {
     /// 沉默超时的条数（`result = "stalled"`）。**计入失败**（exit 1），但在
     /// JSON 里单列：`timed out` 与 `stalled` 的补救方向不同，不能压成一个数。
     pub stalled: usize,
+    /// 执行面缺件的条数（`result = "env_missing"`）。**判不了**（exit 2），不计入
+    /// `passed` 也不计入失败：把这台机器没装 `cargo` 与"这个仓坏了"压在同一个数里，
+    /// 就是 2026-10-26/27 两晚 14/14 全灭却指向错误嫌疑人的成因。
+    pub env_missing: usize,
+    /// 引擎自身错的条数（`result = "tool_error"`）。同样判不了（exit 2）。
+    pub tool_error: usize,
     /// 本轮新被静音的检查名（上一条完成运行里判过，这次 `enabled = false`），
     /// 已扣掉 manifest `[meta] silence-ok` 里声明过的。非空即 verdict 为
     /// `inconclusive`（exit 2）：**"不再判"不是"通过"**。
@@ -69,6 +75,15 @@ pub fn build(
         .iter()
         .filter(|c| c.result == "stalled")
         .count();
+    // 判不了的两类同样单列（见 Report 字段注释）：它们与 fail 的补救方向不同。
+    let env_missing = check_reports
+        .iter()
+        .filter(|c| c.result == "env_missing")
+        .count();
+    let tool_error = check_reports
+        .iter()
+        .filter(|c| c.result == "tool_error")
+        .count();
     Report {
         tool: "verify-gate",
         version: env!("CARGO_PKG_VERSION").into(),
@@ -79,6 +94,8 @@ pub fn build(
         verdict: verdict.to_string(),
         passed: pass,
         stalled,
+        env_missing,
+        tool_error,
         silenced: Vec::new(),
         checks: check_reports,
     }
@@ -98,11 +115,13 @@ pub fn render_pretty(r: &Report) -> String {
     let failed = r.checks.iter().filter(|c| c.result == "fail").count();
     let na = r.checks.iter().filter(|c| c.result == "na").count();
     out.push_str(&format!(
-        "  {} checks · {} passed · {} failed · {} stalled · {} na · {} ms\n",
+        "  {} checks · {} passed · {} failed · {} stalled · {} env_missing · {} tool_error · {} na · {} ms\n",
         r.checks.len(),
         r.passed,
         failed,
         r.stalled,
+        r.env_missing,
+        r.tool_error,
         na,
         r.duration_ms
     ));
@@ -112,6 +131,8 @@ pub fn render_pretty(r: &Report) -> String {
             "fail" => "✘",
             // 沉默超时：是失败，但不是"退出了但不对"，用不同符号让它在一行里可辨。
             "stalled" => "⏳",
+            // 判不了（缺件/引擎错）：既不是通过也不是漂移。
+            "env_missing" | "tool_error" => "⚠",
             _ => "·",
         };
         out.push_str(&format!(

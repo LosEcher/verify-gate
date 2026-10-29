@@ -26,6 +26,20 @@ pub enum Res {
     /// `stalled` = 中途不出声。两者补救方向完全不同（加预算 vs 查死锁/等锁/等
     /// 网络的点），压成一个标签会让报告指向错的嫌疑人。
     Stalled,
+    /// **执行面缺件**：`sh`/`cmd` 根本找不到这条命令（退出码 126/127/9009）。
+    ///
+    /// 与 `Fail` 分属两类：`Fail` 是"命令跑了，结果不对"；`EnvMissing` 是"命令
+    /// 没跑成"。压成一个标签就是 2026-10-08 那类事故的下游成因 —— 一台机器的
+    /// PATH 缺 `~/.cargo/bin`，十几条 `cargo …` 判据全被记成"产品漂移"，真问题被
+    /// 淹没（`dsfolder/.rust-los-gov/gate-runs.jsonl` 2026-10-26/27 两晚 14/14 再现：
+    /// `/bin/sh: cargo: command not found`）。判定：`inconclusive`（退出码 2）。
+    EnvMissing,
+    /// **引擎自身错**（工具层 bug：I/O、运行期正则错误、管道缺失…）。
+    ///
+    /// 与 `EnvMissing` 同为"判不了"，但补救方向不同（修 verify-gate vs 修环境）。
+    /// 此前它被压成 `fail("tool error (see exit 2)")` —— 报告说 fail、退出码说 2，
+    /// 同一状态两份表示（下游只读 JSON 的消费方看到的是 fail）。
+    ToolError,
     Na,
 }
 
@@ -35,6 +49,8 @@ impl Res {
             Res::Pass => "pass",
             Res::Fail => "fail",
             Res::Stalled => "stalled",
+            Res::EnvMissing => "env_missing",
+            Res::ToolError => "tool_error",
             Res::Na => "na",
         }
     }
@@ -74,6 +90,22 @@ impl Outcome {
     pub fn stalled(detail: impl Into<String>, duration_ms: u64) -> Self {
         Outcome {
             result: Res::Stalled,
+            detail: detail.into(),
+            duration_ms,
+        }
+    }
+    /// 执行面缺件（命令不存在）——`inconclusive`，不是漂移。
+    pub fn env_missing(detail: impl Into<String>, duration_ms: u64) -> Self {
+        Outcome {
+            result: Res::EnvMissing,
+            detail: detail.into(),
+            duration_ms,
+        }
+    }
+    /// 引擎自身错——同样 `inconclusive`，但归因于工具而非环境。
+    pub fn tool_error(detail: impl Into<String>, duration_ms: u64) -> Self {
+        Outcome {
+            result: Res::ToolError,
             detail: detail.into(),
             duration_ms,
         }
@@ -311,6 +343,30 @@ fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
     };
 
     let expected = c.exit.unwrap_or(0);
+
+    // ── 执行面缺件：命令根本没跑成（不是"跑了但结果不对"）──────────────────
+    // 判据必须由**输出与退出码**共同决定，不能只看其中一个：
+    //   * 退出码 126/127（POSIX sh：找到但不可执行 / 找不到）；9009（Windows cmd：
+    //     "not recognized"）；这些码是 shell 自己产的，不是被跑的命令产的。
+    //   * 强文本："command not found" / "is not recognized as an internal or
+    //     external command"。只在没有更好判据时用它（Windows 上 cmd 有时只回 1）。
+    // 逃生口两处，缺一就会误伤：
+    //   ① manifest 显式 `exit = 127`（作者就是要验证"这条命令不存在"）⇒ 不算缺件；
+    //   ② `allow_missing = true`（作者承认缺件时按失败计）⇒ 落到下面的 fail 分支。
+    if !c.allow_missing {
+        if let Some(reason) = missing_command(exit_code, &stderr_s, expected) {
+            return Ok(Outcome::env_missing(
+                format!(
+                    "{reason}; 这不是仓库漂移 —— 执行面缺少该命令（PATH/安装/沙箱）。\
+                     stdout tail: {}; stderr tail: {}",
+                    snippet(&stdout_s, 160),
+                    snippet(&stderr_s, 200)
+                ),
+                0,
+            ));
+        }
+    }
+
     let mut problems: Vec<String> = Vec::new();
     if timed_out {
         problems.push(format!("timed out after {}s", c.timeout_secs));
@@ -360,6 +416,80 @@ fn run_cmd(c: &CmdCheck, cwd: &Path) -> Result<Outcome, String> {
             0,
         ))
     }
+}
+
+/// 判定"命令根本没跑成"（执行面缺件）。返回一句**点名**的原因，否则 `None`。
+///
+/// 为什么要有这条判据（而不是让调用方看退出码自己猜）：
+/// 同一次失败在**三层**会得到三种问法 —— 命令自己说"我不存在"（shell 退出码
+/// 126/127/9009）、verification 记录只留下 `status=failed` + 一段文本、上游台账
+/// 再把"failed"读成漂移。缺掉这一层，**每一层都得靠正则猜**，而正则猜错就要么
+/// 淹没真漂移、要么放过真问题（2026-10-08 / 2026-10-26 两次实测）。
+///
+/// 判据（必须"退出码 **或** 强文本"其一，且**不能**与声明的期望码重合）：
+/// - 退出码：`126`（找到了但不可执行）、`127`（找不到）、`9009`（Windows cmd）；
+/// - 强文本：`command not found`、`is not recognized as an internal or external
+///   command`（cmd）、`The term '…' is not recognized`（PowerShell）。
+///
+/// 刻意**不**用 `No such file or directory` 单独作判据：那既可能是命令缺失，
+/// 也可能是命令自己打不开某个文件 —— 后者是真实失败，误判成"判不了"就是放过问题。
+pub fn missing_command(exit_code: Option<i32>, stderr: &str, expected: i32) -> Option<String> {
+    let code = exit_code?;
+    if code == expected {
+        return None;
+    }
+    const SHELL_MISSING: [i32; 3] = [126, 127, 9009];
+    let by_code = SHELL_MISSING.contains(&code);
+    let text = stderr.to_ascii_lowercase();
+    let by_text = text.contains("command not found")
+        || text.contains("is not recognized as an internal or external command")
+        || text.contains("is not recognized as the name of a cmdlet");
+    if !by_code && !by_text {
+        return None;
+    }
+    let name = missing_name(stderr);
+    Some(match (name, by_code) {
+        (Some(n), _) => format!("command not found: {n} (exit {code})"),
+        (None, true) => format!("shell could not run the command (exit {code})"),
+        (None, false) => format!("shell reported a missing command (exit {code})"),
+    })
+}
+
+/// 从 shell 的报错里抠出**缺失的命令名**（点名的价值：修 PATH 的人按名字找）。
+fn missing_name(stderr: &str) -> Option<String> {
+    for line in stderr.lines() {
+        let l = line.trim();
+        if let Some(head) = l.strip_suffix(": command not found") {
+            // `sh: 1: cargo: command not found` / `zsh:1: command not found: cargo`
+            if let Some(name) = head.rsplit(": ").next() {
+                let name = name.trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        if let Some(rest) = l.strip_prefix("zsh: command not found: ") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        let lower = l.to_ascii_lowercase();
+        if lower.contains("is not recognized as an internal or external command")
+            || lower.contains("is not recognized as the name of a cmdlet")
+        {
+            // `'cargo' is not recognized as …` / `The term 'cargo' is not recognized …`
+            if let Some(start) = l.find('\'') {
+                if let Some(len) = l[start + 1..].find('\'') {
+                    let name = &l[start + 1..start + 1 + len];
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn spawn_reader(
@@ -616,5 +746,60 @@ mod tests {
         let b = Outcome::fail("secret output xyz", 1);
         assert_eq!(a.evidence_hash(), b.evidence_hash());
         assert_ne!(a.evidence_hash(), Outcome::fail("other", 1).evidence_hash());
+    }
+
+    /// 执行面缺件 vs 真实失败：**两个方向都要断言**。
+    /// 只测"该判成缺件"会放过误伤（把真实失败判成"判不了"= 放过问题）；
+    /// 只测"不该判成缺件"会留下 2026-10-26 那类淹没（环境故障记成漂移）。
+    #[test]
+    fn missing_command_classification() {
+        // 正向：POSIX sh / dash 的 127，且能点名
+        let r = missing_command(Some(127), "sh: 1: cargo: command not found\n", 0)
+            .expect("127 must classify as env-missing");
+        assert!(r.contains("cargo"), "reason must name the command: {r}");
+        assert!(r.contains("127"), "reason must carry the exit code: {r}");
+
+        // 正向：zsh 的另一种措辞
+        let r = missing_command(Some(127), "zsh: command not found: rustfmt\n", 0).unwrap();
+        assert!(r.contains("rustfmt"), "{r}");
+
+        // 正向：Windows cmd 的 9009 + 引号点名的文本
+        let r = missing_command(
+            Some(9009),
+            "'cargo' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n",
+            0,
+        )
+        .unwrap();
+        assert!(r.contains("cargo"), "{r}");
+
+        // 正向：退出码 126（找到但不可执行）也是缺件
+        assert!(missing_command(Some(126), "sh: 1: ./gate: Permission denied\n", 0).is_some());
+
+        // 只有强文本、退出码是 1 时仍要判起（cmd 有时只回 1）
+        assert!(missing_command(
+            Some(1),
+            "'cargo' is not recognized as an internal or external command\r\n",
+            0
+        )
+        .is_some());
+
+        // 负向控制①：声明 `exit = 127` 的作者显式承认"这条命令就该不存在"
+        assert!(
+            missing_command(Some(127), "sh: 1: cargo: command not found\n", 127).is_none(),
+            "manifest-declared expected exit must win"
+        );
+
+        // 负向控制②：真失败（断言不符 / 编译错）绝不能被判成缺件
+        assert!(
+            missing_command(Some(101), "test result: FAILED. 3 passed; 1 failed\n", 0).is_none()
+        );
+        assert!(missing_command(Some(1), "error: could not compile `x`\n", 0).is_none());
+
+        // 负向控制③：`No such file or directory` 单独出现**不**足以判缺件
+        // （命令跑起来了、只是它自己打不开文件 → 真实失败）
+        assert!(missing_command(Some(1), "cat: ./nope: No such file or directory\n", 0).is_none());
+
+        // 负向控制④：没有退出码（被 kill / 超时）时不猜
+        assert!(missing_command(None, "command not found\n", 0).is_none());
     }
 }

@@ -345,7 +345,10 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
 
     let mut results: Vec<(usize, String, String, check::Outcome)> = Vec::new();
     let mut failed = 0usize;
+    let mut pass = 0usize;
     let mut stalled = 0usize;
+    let mut env_missing = 0usize;
+    let mut tool_errors = 0usize;
     let mut na = 0usize;
     let mut tool_error: Option<String> = None;
     // Checks that are `na` *because this manifest disables them* (the only `na`
@@ -380,25 +383,34 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
             match guarded {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
-                    // tool-side error → G0: exit 2, not a verification failure
-                    tool_error = Some(e);
-                    check::Outcome::fail("tool error (see exit 2)", 0)
+                    // tool-side error → G0: exit 2, not a verification failure.
+                    // 结果**必须**也标成 tool_error：此前这里写的是 fail，于是
+                    // 报告说 fail、退出码说 2 —— 下游只读 JSON 的消费方看到的是漂移。
+                    tool_error = Some(e.clone());
+                    check::Outcome::tool_error(format!("tool error: {e}"), 0)
                 }
                 Err(_) => {
-                    tool_error = Some(format!("check \"{name}\" panicked (engine bug)"));
-                    check::Outcome::fail("engine panic (see exit 2)", 0)
+                    let msg = format!("check \"{name}\" panicked (engine bug)");
+                    tool_error = Some(msg.clone());
+                    check::Outcome::tool_error(msg, 0)
                 }
             }
         };
         // `stalled`（沉默超时）与 `fail` 同为失败：都意味着这条检查没通过其声明的
         // 契约。区别只在标签与补救方向，所以它计入 failed，同时另计一份给报告。
+        //
+        // `env_missing` / `tool_error` 是**判不了**（exit 2），既不进 failed 也不进
+        // pass：把它们算成失败就是把"这台机器没装 cargo"记成"这个仓坏了"
+        // （2026-10-26/27 两晚 14/14 的形态）。
         match &outcome.result {
-            Res::Pass => {}
+            Res::Pass => pass += 1,
             Res::Fail => failed += 1,
             Res::Stalled => {
                 failed += 1;
                 stalled += 1;
             }
+            Res::EnvMissing => env_missing += 1,
+            Res::ToolError => tool_errors += 1,
             Res::Na => na += 1,
         }
         events::append(
@@ -428,8 +440,10 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
     //
     // 新判据：failed == 0 且 pass == 0 且 total > 0 ⇒ inconclusive（退出码 2）。
     let total = results.len();
-    let pass = total.saturating_sub(failed + na);
     let all_inconclusive = total > 0 && failed == 0 && pass == 0;
+    // "判不了"（执行面缺件 / 引擎自身错）与 "全 na" 一次归拢：都不是通过，也都不
+    // 是漂移。自 2026-10 起 6 仓门禁里反复出现的两种形态，必须在这里分开计。
+    let unjudgeable = env_missing + tool_errors;
 
     // 静音棘轮（2026-10-09）：`enabled = false` 能让一条**上次还在判**的检查
     // 从绿灯里消失，而运行仍然 exit 0。判据：上一条同 manifest 的**已完成**运行里
@@ -448,11 +462,34 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
 
     let verdict = if failed > 0 {
         "fail"
-    } else if all_inconclusive || !silenced.is_empty() {
+    } else if unjudgeable > 0 || all_inconclusive || !silenced.is_empty() {
         "inconclusive"
     } else {
         "pass"
     };
+    if env_missing > 0 {
+        // 点名：修 PATH 的人要按名字找。名字取自**检查名 + 引擎抽出的命令名**
+        // （引擎把命令名写进了 detail，这里不再重复解析输出）。
+        let names: Vec<String> = results
+            .iter()
+            .filter(|(_, _, _, o)| o.result == Res::EnvMissing)
+            .map(|(_, n, _, _)| n.clone())
+            .collect();
+        eprintln!(
+            "verify-gate: {env_missing} 条检查是 env_missing —— 执行面**根本没有这条命令**\
+             （126/127/9009），命令没跑成：{}。\n\
+             这是判不了（exit 2），不是仓库漂移：修 PATH / 装工具 / 放开沙箱后重跑。\
+             若「该命令就该不存在」正是被验证的行为，请在 manifest 里写 exit = <该码> \
+             或 allow_missing = true。",
+            names.join(", ")
+        );
+    }
+    if tool_errors > 0 {
+        eprintln!(
+            "verify-gate: {tool_errors} 条检查是 tool_error —— verify-gate 自身出错\
+             （I/O、运行期正则、管道），这些检查没有真正判过。同样按 exit 2 处理。"
+        );
+    }
     if !silenced.is_empty() {
         eprintln!(
             "verify-gate: {} 条检查本次被静音（上次运行里还判过，这次 enabled = false）：{} —— \
@@ -469,7 +506,10 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
              排查方向是死锁/等锁/等网络/等 stdin，而不是加 timeout_secs。"
         );
     }
-    if all_inconclusive {
+    // 这条提示只在"确实是 na 吞掉了整轮"时成立。若本轮原因是缺件/引擎错，
+    // 上面已经分别点过名 —— 再说"都是 na 或 stalled"就是第二次压平状态
+    // （实测：一条 env_missing 会同时命中 all_inconclusive，提示指向错的嫌疑人）。
+    if all_inconclusive && unjudgeable == 0 {
         eprintln!(
             "verify-gate: 全部 {total} 条检查都是 na 或 stalled（disabled、scope 不匹配、\
              或没有真正生效）—— 没有任何规则真正判过，不构成通过（inconclusive）"
@@ -512,10 +552,12 @@ fn cmd_run(cfg: Config) -> Result<u8, String> {
         eprintln!("verify-gate: tool error: {e}");
         return Ok(2);
     }
-    // inconclusive（全 na / 有新静音）与 tool error 同用退出码 2：含义都是"判不了，不是通过"。
+    // 退出码优先级：**漂移(1) 只在真的判过并有检查不符时**成立；其余判不了的情形
+    // 一律 2 —— 缺件(env_missing)、引擎错(tool_error)、全 na、新静音。
+    // 顺序不能反：只要有一条真失败，就不该被"判不了"盖掉（否则 1 永远出不来）。
     Ok(if failed > 0 {
         1
-    } else if all_inconclusive || !rep.silenced.is_empty() {
+    } else if unjudgeable > 0 || all_inconclusive || !rep.silenced.is_empty() {
         2
     } else {
         0
@@ -573,6 +615,9 @@ fn cmd_policy(cfg: PolicyConfig) -> Result<u8, String> {
             // policy 目前不执行命令、不会产生 stalled；真出现了也按失败算（fail-closed），
             // 不让新状态静默漏计。
             Res::Stalled => failed += 1,
+            // 同理：policy 模式不跑 cmd，env_missing / tool_error 不可达；真出现即
+            // 说明引擎行为变了 —— fail-closed，宁可红也不静默放过。
+            Res::EnvMissing | Res::ToolError => failed += 1,
             Res::Na => na += 1,
         }
         events::append(
